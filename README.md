@@ -1,11 +1,11 @@
 # Disassembly Sequence Learning with Reinforcement Learning
 
-This project implements a Reinforcement Learning (RL) agent using Stable Baselines3 to learn optimal disassembly sequences for a product. The environment is modeled as a state graph where states represent the assembly configuration and actions are disassembly operations.
+This project implements a Reinforcement Learning (RL) agent using tabular Q-learning to learn optimal disassembly sequences for a product. The environment is modeled as a state graph where states represent the assembly configuration and actions are disassembly operations.
 
 ## Project Structure
 
-- `src/agent.py`: Defines the `MaskablePPO` agent creation and loading functions.
-- `src/env.py`: Implements the custom Gymnasium environment `DisassemblyEnv`, which interacts with a pre-computed state graph. It handles state transitions, rewards, and action masking.
+- `src/agent.py`: Defines the tabular Q-learning agent and its save/load helpers.
+- `src/env.py`: Implements the custom Gymnasium environment `AngleGrinderEnv`, which interacts with a pre-computed state graph. It handles state transitions, rewards, and action masking.
 - `src/main.py`: Contains the main training and evaluation logic for the RL agent.
 - `main.py`: Small entry-point wrapper that runs the package-based implementation from `src/`.
 - `graph.pkl` or `ui.html`: (External data) The state graph data for the disassembly problem. `graph.pkl` is preferred, but `ui.html` can be parsed as a fallback.
@@ -15,10 +15,10 @@ This project implements a Reinforcement Learning (RL) agent using Stable Baselin
 
 ## Features
 
-- **Custom Gymnasium Environment**: `DisassemblyEnv` models the disassembly process, providing observations (removed parts), rewards (based on time and goal/dead-end states), and action masks.
-- **Maskable PPO Agent**: Utilizes `sb3_contrib.ppo_mask.MaskablePPO` to handle environments with invalid actions, ensuring the agent only attempts valid disassembly steps.
+- **Custom Gymnasium Environment**: `AngleGrinderEnv` models the disassembly process, providing observations (removed parts), rewards (based on time and goal/dead-end states), and action masks.
+- **Tabular Q-learning Agent**: Learns a state-action value table and masks invalid actions so the agent only considers legal disassembly steps.
 - **Training and Evaluation**: Scripts to train a new agent from scratch and evaluate its performance.
-- **Model Checkpointing**: Saves the agent's progress periodically during training.
+- **Persisted Q-table**: Saves the learned Q-table to disk so it can be loaded later for evaluation.
 
 ## Setup
 
@@ -51,11 +51,11 @@ python main.py
 ```
 
 This will:
-1.  Train a `MaskablePPO` agent for `200000` timesteps.
-2.  Save the final model to `./models/disassembly_agent_final.zip`.
+1.  Train a tabular Q-learning agent for `2000` episodes.
+2.  Save the learned Q-table to `./models/disassembly_agent_q_table.pkl`.
 3.  Evaluate the trained agent by running one episode and printing the actions taken and rewards received.
 
-You can adjust `total_timesteps` in `src/main.py` for longer or shorter training runs.
+You can adjust the episode count or step limit in `src/main.py` for longer or shorter training runs.
 
 ## TensorBoard
 
