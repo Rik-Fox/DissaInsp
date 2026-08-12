@@ -75,19 +75,10 @@ def main():
     graph_data_path = project_root / "graph.pkl"
 
     if not graph_data_path.exists():
-        graph_data_path = (
-            project_root
-            / "disassembly_graph"
-            / "disassembly_angle_grinder"
-            / "disassembly_angle_grinder"
-            / "ui.html"
+        print(
+            "Please place 'graph.pkl' in the project root or keep the disassembly assets under 'disassembly_graph/'."
         )
-        if not graph_data_path.exists():
-            print("Error: Data file not found.")
-            print(
-                "Please place 'graph.pkl' in the project root or keep the disassembly assets under 'disassembly_graph/'."
-            )
-            raise SystemExit(1)
+        raise SystemExit(1)
 
     env = AngleGrinderEnv(graph_path=str(graph_data_path))
 

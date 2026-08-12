@@ -8,22 +8,14 @@ env/
 .venv/
 venv/
 
-# Stable Baselines3 specific
-models/
-ppo_disassembly_tensorboard/
+.vscode/
+.vscode
 
 # Disassembly example assets
 # Ignore the example folders and archives.
 disassembly_graph/
 disassembly*/
 disassembly*.zip
-
-# Data files (if generated or large)
-# graph.pkl is an input, but if it's large or generated, you might want to ignore it.
-# ui.html is also an input, but can be large.
-# Consider if these should be committed or ignored based on their source and size.
-# graph.pkl
-# ui.html
 
 # OS specific
 .DS_Store

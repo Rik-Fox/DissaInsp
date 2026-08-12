@@ -32,17 +32,10 @@ class AngleGrinderEnv(gym.Env):
             with open(graph_path, "rb") as f:
                 loaded_graph = pickle.load(f)
         except (pickle.UnpicklingError, TypeError):
-            print("Could not load as pickle. Trying to parse as JS object...")
-            self.graph_data = self._load_graph_from_js_object(graph_path)
-            self._load_from_dict_format(self.graph_data)
-            self.current_state_id = self.root_state
-            self.render_mode = render_mode
-            return
+            print("Could not load as pickle.")
+            raise SystemExit(1)
 
-        if isinstance(loaded_graph, dict):
-            self.graph_data = loaded_graph
-            self._load_from_dict_format(self.graph_data)
-        elif isinstance(loaded_graph, nx.Graph) or isinstance(loaded_graph, nx.DiGraph) or isinstance(loaded_graph, nx.MultiDiGraph):
+        if isinstance(loaded_graph, nx.Graph):
             self.graph_data = self._load_from_networkx_graph(loaded_graph)
         else:
             raise TypeError(f"Unsupported graph data type: {type(loaded_graph)!r}")
@@ -50,32 +43,6 @@ class AngleGrinderEnv(gym.Env):
         self.current_state_id = self.root_state
         self.render_mode = render_mode
         self.state_histories = {}
-
-    def _load_from_dict_format(self, graph_data):
-        self.states = graph_data["states"]
-        self.actions = graph_data["actions"]
-        self.parts = graph_data["parts"]
-        self.root_state = graph_data["root"]
-        self.transitions = {}
-        self.state_histories = {}
-
-        for state_id, state_info in self.states.items():
-            children = []
-            for child_id in state_info.get("children", []):
-                action_id = self.states[child_id].get("action_id")
-                if action_id:
-                    children.append({"action_id": action_id, "next_state_id": child_id})
-            self.transitions[state_id] = children
-
-        self.part_list = sorted(self.parts.keys())
-        self.part_to_idx = {name: i for i, name in enumerate(self.part_list)}
-
-        self.action_list = sorted(self.actions.keys())
-        self.action_to_idx = {name: i for i, name in enumerate(self.action_list)}
-        self.idx_to_action = {i: name for i, name in enumerate(self.action_list)}
-
-        self.action_space = spaces.Discrete(len(self.action_list))
-        self.observation_space = spaces.MultiBinary(len(self.part_list))
 
     def _load_from_networkx_graph(self, graph):
         self.states = {}
@@ -112,7 +79,11 @@ class AngleGrinderEnv(gym.Env):
             else:
                 edge_source, edge_target, edge_key, edge_data = edge
 
-            action_id = edge_data.get("label") or edge_data.get("target_part") or f"action_{len(self.actions)}"
+            action_id = (
+                edge_data.get("label")
+                or edge_data.get("target_part")
+                or f"action_{len(self.actions)}"
+            )
             if action_id in self.actions:
                 action_id = f"{action_id}_{len(self.actions)}"
 
@@ -161,28 +132,6 @@ class AngleGrinderEnv(gym.Env):
             "parts": self.parts,
             "root": self.root_state,
         }
-
-    def _load_graph_from_js_object(self, file_path):
-        """A helper to parse the JS object from the HTML file if graph.pkl is not a pickle file."""
-        with open(file_path, "r", encoding="utf-8") as f:
-            content = f.read()
-
-        match = re.search(r"const DATA_PRELOADED = (\{.*?\});", content, re.DOTALL)
-        if not match:
-            # Fallback for just the object in the file
-            match = re.search(r"(\{.*?\});?", content, re.DOTALL)
-
-        if not match:
-            raise ValueError("Could not find graph data object in the file.")
-
-        js_object_str = match.group(1)
-
-        # Make it valid JSON by quoting keys
-        json_str = re.sub(
-            r"([\{\s,])([a-zA-Z_][a-zA-Z0-9_]*):", r'\1"\2":', js_object_str
-        )
-
-        return json.loads(json_str)
 
     def _get_obs(self):
         """Creates the binary observation vector for the current state."""
@@ -235,7 +184,9 @@ class AngleGrinderEnv(gym.Env):
             action_details["result"] = "ok"
         return action_details
 
-    def _update_state_history(self, state_id, action_id, action_details, previous_state_id):
+    def _update_state_history(
+        self, state_id, action_id, action_details, previous_state_id
+    ):
         history_entry = {
             "action_id": action_id,
             "action_type": action_details.get("type", "disassemble"),
@@ -286,7 +237,9 @@ class AngleGrinderEnv(gym.Env):
             action_details = self._normalize_action_details(action_id)
             if action_details.get("is_inspection"):
                 next_state_id = previous_state_id
-                self.states[previous_state_id]["last_action_result"] = action_details.get("result")
+                self.states[previous_state_id]["last_action_result"] = (
+                    action_details.get("result")
+                )
                 self.states[previous_state_id]["last_action_id"] = action_id
                 reward = -float(action_details.get("time", 1.0))
                 if action_details.get("result") == "good":
@@ -295,7 +248,9 @@ class AngleGrinderEnv(gym.Env):
                     reward -= 5.0
             else:
                 self.current_state_id = next_state_id
-                self.states[next_state_id]["last_action_result"] = action_details.get("result")
+                self.states[next_state_id]["last_action_result"] = action_details.get(
+                    "result"
+                )
                 self.states[next_state_id]["last_action_id"] = action_id
 
                 # Reward: negative of time taken to encourage efficiency
@@ -313,7 +268,9 @@ class AngleGrinderEnv(gym.Env):
                     # We can treat it as episode truncation.
                     truncated = True
 
-            self._update_state_history(next_state_id, action_id, action_details, previous_state_id)
+            self._update_state_history(
+                next_state_id, action_id, action_details, previous_state_id
+            )
             self.current_state_id = next_state_id
         else:
             # Agent took an invalid action
