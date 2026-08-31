@@ -1,68 +1,75 @@
 import os
 from pathlib import Path
 
-from .agent import create_agent, load_agent
+from .agent import Model, belief_update, initial_belief, load_policy, save_policy, solve
 from .env import AngleGrinderEnv
+from .interface import best_action
 
 
-def train(env, episodes=2000, max_steps_per_episode=50, save_path="./models/"):
+def train(env, n_iterations=5, n_trajectories=20, horizon=10, save_path="./models/"):
     """
-    Train the Q-learning agent and save the learned table.
+    Solve a PBVI policy (Gamma) and save it.
     """
     os.makedirs(save_path, exist_ok=True)
 
-    agent = create_agent(env)
+    model = Model(env)
 
     print("\n--- Starting Training ---")
-    agent.learn(env, episodes=episodes, max_steps_per_episode=max_steps_per_episode)
+    gamma = solve(model, n_iterations=n_iterations, n_trajectories=n_trajectories, horizon=horizon)
 
-    model_path = os.path.join(save_path, "disassembly_agent_q_table.pkl")
-    agent.save(model_path)
-    print(f"\n--- Training Complete. Model saved to {model_path} ---")
-    return agent
+    policy_path = os.path.join(save_path, "disassembly_policy.pkl")
+    save_policy(gamma, policy_path)
+    print(f"\n--- Training Complete. Policy saved to {policy_path} ---")
+    return gamma
 
 
-def evaluate(env, model_path):
+def _observation_index(env, action_id, info):
+    """Maps env.step()'s actual result to the observation index
+    model.observation(action_id)'s labels use."""
+    details = env.actions[action_id]
+    if details["action_type"] == "Disassy":
+        return 0  # o_null
+    if details["type"] == "Inspect":
+        return ["GOOD", "OK", "BAD"].index(info["condition_observation"])
+    return env.state_to_idx[info["state_id"]]  # Verify: o = x' directly
+
+
+def evaluate(env, policy_path):
     """
-    Evaluate a trained agent and print its actions.
+    Run a trained policy against the live env and print its actions.
     """
-    if not os.path.exists(model_path):
-        print(f"Model not found at {model_path}. Please train an agent first.")
+    if not os.path.exists(policy_path):
+        print(f"Policy not found at {policy_path}. Please train a policy first.")
         return
 
-    print(f"\n--- Loading model from {model_path} for evaluation ---")
-    agent = load_agent(model_path, env)
+    print(f"\n--- Loading policy from {policy_path} for evaluation ---")
+    gamma = load_policy(policy_path)
+    model = Model(env)
 
-    observation, info = env.reset()
+    env.reset()
+    b = initial_belief(model)
+    x_idx = env.state_to_idx[env.root_state]
 
     total_reward = 0.0
-    terminated = False
-
     print("\n--- Evaluation Run ---")
-    while not terminated:
-        action, _ = agent.predict(
-            observation,
-            action_mask=info.get("action_mask"),
-            deterministic=True,
-        )
-        observation, reward, terminated, truncated, info = env.step(action)
-
-        action_id = env.idx_to_action[action]
-        action_details = env.actions[action_id]
-        print(
-            f"Step: Took action '{action_id}' ({action_details['type']} {action_details['part']}), Reward: {reward:.2f}"
-        )
-
-        total_reward += reward
-
-        if terminated or truncated:
-            if info.get("is_goal"):
-                print("Goal reached!")
-            elif info.get("is_dead_end"):
-                print("Reached a dead end.")
-            else:
-                print("Episode terminated.")
+    while True:
+        action_id = best_action(gamma, x_idx, b)
+        if action_id is None:
+            print("No action recorded for this belief - stopping.")
             break
+
+        action_idx = env.action_to_idx[action_id]
+        observation, reward, terminated, truncated, info = env.step(action_idx)
+        total_reward += reward
+        print(f"Step: Took action '{action_id}', Reward: {reward:.2f}")
+
+        if env.actions[action_id]["action_type"] == "Triage":
+            print(f"Final triage action: {action_id}")
+            break
+
+        o_idx = _observation_index(env, action_id, info)
+        b = belief_update(model, b, action_id, o_idx)
+        x_idx = env.state_to_idx[info["state_id"]]
 
     print("--- Evaluation Complete ---")
     print(f"Total reward: {total_reward:.2f}")
@@ -85,11 +92,11 @@ def main():
     save_dir = project_root / "models"
     save_dir.mkdir(exist_ok=True)
 
-    # --- 1. Train a new agent ---
-    train(env, episodes=2000, max_steps_per_episode=50, save_path=str(save_dir))
+    # --- 1. Train a new policy ---
+    train(env, n_iterations=5, n_trajectories=20, horizon=10, save_path=str(save_dir))
 
-    # --- 2. Evaluate the final trained agent ---
-    evaluate(env, str(save_dir / "disassembly_agent_q_table.pkl"))
+    # --- 2. Evaluate the final trained policy ---
+    evaluate(env, str(save_dir / "disassembly_policy.pkl"))
 
 
 if __name__ == "__main__":
