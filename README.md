@@ -126,7 +126,7 @@ not just full trust.
 | Config                     | What it shows                                                                                   |
 |-----------------------------|---------------------------------------------------------------------------------------------------|
 | `default`                  | Inspecting costs more than the information is worth - go straight to Triage. Even the *optimal* inspect-then-triage strategy scores lower than committing immediately given these numbers - don't be surprised if `src/interface.py` recommends skipping inspection entirely with this one. |
-| `reliable_repair_vs_reuse` | Payoffs that clearly separate outcomes - a `GOOD` reading leads to `Reuse`, a `BAD` reading leads to `Refurbished` (repair), mirroring a realistic triage call. |
+| `reliable_repair_vs_reuse` | Payoffs that clearly separate outcomes - a `GOOD` reading leads to `Reuse`, a `BAD` reading leads to `Refurbished` (repair), a simplified version of triage where recycling is strickly dominated|
 
 **Performance note:** `src/agent.py`'s backup is unoptimized - it's
 noticeably slower for `Verify`, since its observation alphabet is the full
@@ -134,39 +134,3 @@ set of physical states (`Verify` deterministically reveals `x'`), so the
 backup loops over ~1600 columns for that one action on the real graph. Fine
 for a draft/small runs, but expect it to dominate solve time at scale.
 
-## Usage
-
-```python
-from src.env import AngleGrinderEnv
-
-env = AngleGrinderEnv(graph_path="graph.pkl", config="reliable_repair_vs_reuse")
-observation, info = env.reset()  # samples a hidden ground-truth condition y
-action = info["action_mask"].argmax()  # any valid action, e.g. via the mask
-observation, reward, terminated, truncated, info = env.step(action)
-```
-
-To solve a policy offline and test it interactively:
-
-```python
-from src.env import AngleGrinderEnv
-from src.agent import Model, solve, save_policy
-
-env = AngleGrinderEnv(graph_path="graph.pkl")
-gamma = solve(Model(env), n_iterations=5, n_trajectories=20, horizon=10)
-save_policy(gamma, "policy.pkl")
-```
-
-## Tests
-
-```bash
-python -m unittest discover -s tests
-```
-
-## TensorBoard
-
-During training, TensorBoard logs are generated in the `ppo_disassembly_tensorboard/` directory. You can view them by running:
-
-```bash
-tensorboard --logdir ppo_disassembly_tensorboard/
-```
-Then open your web browser to the address provided by TensorBoard (usually `http://localhost:6006`).
