@@ -6,7 +6,7 @@ import numpy as np
 import scipy.sparse as sp
 from gymnasium import spaces
 
-from .configs import CONFIGS, DEFAULT
+from .configs import CONFIGS
 from .pomdp import JointStateSpace, ObservationModel, RewardModel, TransitionModel, TRIAGE_ACTIONS
 
 # Hidden condition state y.
@@ -34,43 +34,20 @@ class AngleGrinderEnv(gym.Env):
     a state's id is the sorted tuple of its remaining parts, so removing the
     same set of parts in a different order always lands on the same state.
     This lets each Disassy capability ("Unscrew", "Remove") be a single
-    global action rather than one action per part: at a given state, taking
-    "Unscrew" always resolves to the same canonically-chosen screw (the one
-    whose resulting state sorts first) - which specific screw doesn't matter
-    since order doesn't affect the reachable state space, only which nodes
-    it passes through. A part can only be "Remove"d once the graph actually
-    has that edge, i.e. once its retaining screws are already gone.
+    global action rather than one action per part: at a given state.
 
     Actions are partitioned into "Disassy" (Unscrew/Remove), "Insp"
-    (Verify/Inspect), and "Triage" (terminal) actions:
-    - Disassy actions change the physical state x but reveal a null
-      observation. Each succeeds (moves to the graph-implied x') with
-      probability config.disassy_success_prob, otherwise fails and stays at
-      x - no other x' is ever reachable. Cost is the removed edge's own time.
-    - Verify actions leave x unchanged and reveal x directly.
-    - Inspect actions leave x unchanged and reveal a condition observation of
-      the hidden state y (GOOD/OK/BAD), sampled from pomdp.ObservationModel
-      rather than a direct/deterministic map of the ground truth. A single
-      reading can be quite noisy (see configs.py); repeated Inspect actions
-      and Bayesian belief updates are what let confidence build up over time.
-    - Triage actions (Reuse/Refurbished/Recycle) end the episode with a
-      payoff drawn from pomdp.RewardModel.triage, dependent on y. This is the
-      only source of positive reward - there is no separate "goal" bonus.
-    Verify, Inspect, and Triage are always valid, regardless of x.
-
-    Reward and transition/observation semantics are computed via
-    pomdp.RewardModel/TransitionModel/ObservationModel so the simulator and
-    the PBVI solver (src/agent.py) share the same T/Z/R definitions. All of
-    the actual numbers (success probability, costs, sensor reliability,
-    Triage payoffs) come from a configs.Config - see configs.py for the
-    available named configs and what each is meant to demonstrate.
+    (Verify/Inspect), and "Triage" (terminal) actions. Disassy actions change
+    the physical state x and reveal no observation; Inspect reveals a noisy observation 
+    of the hidden condition y; Verify reveals the true physical state x; 
+    Triage ends the episode with a payoff based on the true condition y.
     """
 
     action_space: spaces.Discrete
     observation_space: spaces.MultiBinary
     metadata = {"render_modes": ["human"], "render_fps": 4}
 
-    def __init__(self, graph_path, render_mode=None, config="default"):
+    def __init__(self, graph_path, render_mode=None, config="no_inspection"):
         super().__init__()
         self.config = CONFIGS[config] if isinstance(config, str) else config
 
@@ -292,7 +269,7 @@ class AngleGrinderEnv(gym.Env):
                 condition_observation = self._sample_condition_observation()
                 observation = self._null_obs()  # reveals nothing about x
         else:
-            # Disassembly/fixing action: updates x but reveals no observation.
+            # Disassembly action: updates x but reveals no observation.
             edge = self.disassy_by_state[self.current_state_id][action_id]
             reward = self.reward_model.flat_cost(edge["time"])
             self.current_state_id = self._sample_next_state(action_id)

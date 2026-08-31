@@ -16,8 +16,8 @@ class Config:
     condition_obs_matrix: list  # (3, 3): rows=true y, cols=GOOD/OK/BAD
 
 
-DEFAULT = Config(
-    name="default",
+NO_INSPEC = Config(
+    name="no_inspection",
     description="Inspecting costs more than the information is worth - go straight to Triage.",
     disassy_success_prob=0.9,
     verify_cost=1.0,
@@ -34,9 +34,9 @@ DEFAULT = Config(
     ],
 )
 
-# Payoffs that clearly separate outcomes: GOOD -> Reuse, BAD -> Refurbished.
-RELIABLE_REPAIR_VS_REUSE = Config(
-    name="reliable_repair_vs_reuse",
+# Payoffs that clearly separate outcomes: GOOD -> Reuse, BAD -> Refurbished, Recycle is strictly dominated
+REPAIR_VS_REUSE = Config(
+    name="repair_vs_reuse",
     description="Payoffs that clearly favor Refurbish when degraded, Reuse when not.",
     disassy_success_prob=0.9,
     verify_cost=0.5,
@@ -53,4 +53,4 @@ RELIABLE_REPAIR_VS_REUSE = Config(
     ],
 )
 
-CONFIGS = {c.name: c for c in [DEFAULT, RELIABLE_REPAIR_VS_REUSE]}
+CONFIGS = {c.name: c for c in [NO_INSPEC, REPAIR_VS_REUSE]}

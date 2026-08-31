@@ -16,6 +16,7 @@ import pickle
 
 import numpy as np
 import scipy.sparse as sp
+from tqdm import tqdm
 
 from .env import ALWAYS_VALID_ACTIONS, CONDITION_OBS, CONDITIONS
 
@@ -197,10 +198,19 @@ def solve(model, n_iterations=5, n_trajectories=20, horizon=10, epsilon=0.05, di
     root_x = model.env.state_to_idx[model.env.root_state]
     gamma = {root_x: [(np.zeros(model.space.n_s), None)]}
 
-    for _ in range(n_iterations):
+    # for i in range(n_iterations):
+    #     belief_sets = expand_beliefs(model, belief_sets, n_trajectories, horizon, epsilon, rng)
+    #     print(f"--- Iteration {i + 1}/{n_iterations}: {sum(len(v) for v in belief_sets.values())} belief points ---")
+    #     gamma = backup(model, belief_sets, gamma, discount)
+    #     print(f"--- Iteration {i + 1}/{n_iterations}: {sum(len(v) for v in gamma.values())} alpha-vectors ---")
+        
+    for i in tqdm(range(n_iterations), desc="Solving", unit="iter"):
         belief_sets = expand_beliefs(model, belief_sets, n_trajectories, horizon, epsilon, rng)
-        gamma = backup(model, belief_sets, gamma, discount)
+        tqdm.write(f"--- Iteration {i + 1}/{n_iterations}: {sum(len(v) for v in belief_sets.values())} belief points ---")
 
+        gamma = backup(model, belief_sets, gamma, discount)
+        tqdm.write(f"--- Iteration {i + 1}/{n_iterations}: {sum(len(v) for v in gamma.values())} alpha-vectors ---")
+        
     return gamma
 
 

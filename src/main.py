@@ -87,13 +87,13 @@ def main():
         )
         raise SystemExit(1)
 
-    env = AngleGrinderEnv(graph_path=str(graph_data_path))
+    env = AngleGrinderEnv(graph_path=str(graph_data_path), config="repair_vs_reuse")
 
     save_dir = project_root / "models"
     save_dir.mkdir(exist_ok=True)
 
     # --- 1. Train a new policy ---
-    train(env, n_iterations=5, n_trajectories=20, horizon=10, save_path=str(save_dir))
+    train(env, n_iterations=15, n_trajectories=10, horizon=15, save_path=str(save_dir))
 
     # --- 2. Evaluate the final trained policy ---
     evaluate(env, str(save_dir / "disassembly_policy.pkl"))
