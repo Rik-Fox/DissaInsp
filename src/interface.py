@@ -8,21 +8,22 @@ import argparse
 
 import numpy as np
 
-from .env import AngleGrinderEnv, CONDITIONS
+from .env import AngleGrinderEnv, CONDITIONS, INSPECTION_ACTIONS
 from .agent import Model, belief_update, initial_belief, load_policy, most_likely_x
 
 
-def best_action(gamma, x_idx, b):
-    """Argmax over the alpha-vectors recorded for belief points nominally at
-    physical node x_idx (falls back to the full policy if none were)."""
-    candidates = gamma.get(x_idx) or [pair for points in gamma.values() for pair in points]
+def best_action(gamma, env, b):
+    """Argmax over gamma's alpha-vectors whose tagged action is currently
+    valid in env - see README on Verify/Inspect masking."""
+    valid = env._get_valid_actions()
     best_value, chosen = -np.inf, None
-    for alpha, action_id in candidates:
-        if action_id is None:
-            continue
-        value = float(b @ alpha)
-        if value > best_value:
-            best_value, chosen = value, action_id
+    for points in gamma.values():
+        for alpha, action_id in points:
+            if action_id is None or action_id not in valid:
+                continue
+            value = float(b @ alpha)
+            if value > best_value:
+                best_value, chosen = value, action_id
     return chosen
 
 
@@ -59,22 +60,29 @@ def run(policy_path, graph_path):
     gamma = load_policy(policy_path)
 
     b = initial_belief(model)
-    x_idx = model.env.state_to_idx[model.env.root_state]
 
     while True:
-        action_id = best_action(gamma, x_idx, b)
+        action_id = best_action(gamma, env, b)
         if action_id is None:
             print("No action recorded for this belief - stopping.")
             break
         print(f"AGENT DECISION: Execute action '{action_id}'")
 
-        if model.env.actions[action_id]["action_type"] == "Triage":
+        details = env.actions[action_id]
+        if details["action_type"] == "Triage":
             print(f"Episode complete - final triage action: {action_id}")
             break
 
         o_idx, confidence = prompt_observation(model, action_id)
         b = belief_update(model, b, action_id, o_idx, confidence)
-        x_idx = most_likely_x(model, b)
+
+        # No live env.step() here (a human supplies the observation), so
+        # env's own mask state must be updated by hand.
+        env.current_state_id = env.state_list[most_likely_x(model, b)]
+        if details["action_type"] == "Disassy":
+            env.available_insp_actions = set(INSPECTION_ACTIONS)
+        else:  # Insp
+            env.available_insp_actions.discard(action_id)
 
         marginal_condition = b.reshape(model.space.n_y, model.space.n_x).sum(axis=1)
         summary = {c: round(float(p), 3) for c, p in zip(CONDITIONS, marginal_condition)}

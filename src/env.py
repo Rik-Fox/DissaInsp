@@ -20,27 +20,18 @@ CAPABILITY_TO_TYPE = {
     "ManipulatingCapability": "Remove",
 }
 
-# Verify, Inspect, and Triage are always valid, independent of the physical
-# graph - they aren't disassembly operations on x, so they aren't tied to
-# any particular node/edge in it.
-ALWAYS_VALID_ACTIONS = {"Verify", "Inspect", *TRIAGE_ACTIONS}
+# Verify/Inspect: masked out once used until the next Disassy attempt.
+INSPECTION_ACTIONS = {"Verify", "Inspect"}
 
 
 class AngleGrinderEnv(gym.Env):
     """
     A custom Gymnasium environment for the disassembly/triage POMDP.
 
-    States represent physical assembly configurations (parts removed/present);
-    a state's id is the sorted tuple of its remaining parts, so removing the
-    same set of parts in a different order always lands on the same state.
-    This lets each Disassy capability ("Unscrew", "Remove") be a single
-    global action rather than one action per part: at a given state.
-
+    States represent physical assembly configurations (parts removed/present).
     Actions are partitioned into "Disassy" (Unscrew/Remove), "Insp"
-    (Verify/Inspect), and "Triage" (terminal) actions. Disassy actions change
-    the physical state x and reveal no observation; Inspect reveals a noisy observation 
-    of the hidden condition y; Verify reveals the true physical state x; 
-    Triage ends the episode with a payoff based on the true condition y.
+    (Verify/Inspect), and "Triage" (terminal) actions. Verify and 
+    Inspect are each usable once per disassembly cycle.
     """
 
     action_space: spaces.Discrete
@@ -66,6 +57,7 @@ class AngleGrinderEnv(gym.Env):
 
         self.current_state_id = self.root_state
         self.condition = None
+        self.available_insp_actions = set(INSPECTION_ACTIONS)
         self.render_mode = render_mode
         # Lazily built & cached: action_id -> sparse (n_s, n_s) T matrix.
         self._disassy_transitions = {}
@@ -82,11 +74,8 @@ class AngleGrinderEnv(gym.Env):
             for part_name in [*node_attrs.get("parts_present", []), *node_attrs.get("parts_removed", [])]:
                 self.parts[part_name] = {}
 
-        # For each state, the single canonical edge per Disassy type. Among
-        # several candidates (e.g. several removable screws), we keep the one
-        # whose successor state sorts first - an arbitrary but deterministic
-        # and stable choice, valid because node identity (sorted remaining
-        # parts) doesn't depend on removal order.
+        # Canonical edge per Disassy type per state: keep the
+        # lexicographically smallest successor (see README for the tie-break).
         self.disassy_by_state = {state_id: {} for state_id in self.states}
         disassy_types = set()
         edge_items = graph.edges(keys=True, data=True) if graph.is_multigraph() else graph.edges(data=True)
@@ -164,11 +153,10 @@ class AngleGrinderEnv(gym.Env):
         }
 
     def _get_valid_actions(self):
-        """Valid action IDs from the current state: the graph-defined Disassy
-        types available at this node, plus Verify/Inspect/Triage (always
-        valid)."""
+        """Graph-defined Disassy actions at this node, plus Triage and
+        whichever of Verify/Inspect haven't been used this cycle."""
         disassy_actions = set(self.disassy_by_state[self.current_state_id].keys())
-        return disassy_actions | ALWAYS_VALID_ACTIONS
+        return disassy_actions | self.available_insp_actions | set(TRIAGE_ACTIONS)
 
     def _get_valid_actions_mask(self):
         """Binary mask over action_list for the currently valid actions."""
@@ -185,8 +173,7 @@ class AngleGrinderEnv(gym.Env):
 
     def _disassy_transition_matrix(self, action_id):
         """Sparse (n_s, n_s) T matrix for a Disassy action, built once and
-        cached across every state that defines it - cheap since there are
-        only a handful of Disassy action types (not one per part)."""
+        cached across every state that defines it."""
         cached = self._disassy_transitions.get(action_id)
         if cached is not None:
             return cached
@@ -228,6 +215,7 @@ class AngleGrinderEnv(gym.Env):
         options = options or {}
         self.condition = options.get("condition") or str(self.np_random.choice(CONDITIONS))
         self.current_state_id = self.root_state
+        self.available_insp_actions = set(INSPECTION_ACTIONS)
 
         observation = self._get_obs()
         info = self._get_info()
@@ -241,8 +229,13 @@ class AngleGrinderEnv(gym.Env):
         action_id = self.idx_to_action.get(action)
 
         if action_id not in self._get_valid_actions():
-            # Agent took an invalid (masked-out) action.
-            return self._get_obs(), -100, True, False, self._get_info()
+            # Every real caller derives action_id from this same mask, so
+            # reaching here means our own code is wrong - raise, don't
+            # model it as a reward penalty.
+            raise ValueError(
+                f"Invalid action {action_id!r} at state {self.current_state_id!r} - "
+                f"valid actions are {sorted(self._get_valid_actions())}"
+            )
 
         action_details = self._normalize_action_details(action_id)
         category = action_details["action_type"]
@@ -251,9 +244,7 @@ class AngleGrinderEnv(gym.Env):
         condition_observation = None
 
         if category == "Triage":
-            # The only source of positive reward: a payoff dependent on the
-            # true condition y, looked up directly (0 for an invalid
-            # condition/action combination, no validity check needed).
+            # Only source of positive reward; invalid condition/action combos read 0.
             x_idx = self.state_to_idx[self.current_state_id]
             y_idx = CONDITIONS.index(self.condition)
             payoff = self.reward_model.triage(action_id, CONDITIONS)
@@ -268,12 +259,14 @@ class AngleGrinderEnv(gym.Env):
             else:  # "inspect"
                 condition_observation = self._sample_condition_observation()
                 observation = self._null_obs()  # reveals nothing about x
+            self.available_insp_actions.discard(action_id)  # unavailable until next Disassy attempt
         else:
             # Disassembly action: updates x but reveals no observation.
             edge = self.disassy_by_state[self.current_state_id][action_id]
             reward = self.reward_model.flat_cost(edge["time"])
             self.current_state_id = self._sample_next_state(action_id)
             observation = self._null_obs()
+            self.available_insp_actions = set(INSPECTION_ACTIONS)  # refreshed either way
 
         info = self._get_info(condition_observation)
 

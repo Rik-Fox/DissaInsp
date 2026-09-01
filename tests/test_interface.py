@@ -29,24 +29,28 @@ class InterfaceTests(unittest.TestCase):
 
         self.env = AngleGrinderEnv(graph_path=graph_path)
         self.model = Model(self.env)
-        self.root_idx = self.env.state_to_idx[self.env.root_state]
 
     def test_best_action_picks_the_highest_value_alpha(self):
         b = np.array([1.0, 0.0])
         gamma = {
-            self.root_idx: [
+            "some_node": [
                 (np.array([1.0, 0.0]), "Recycle"),
                 (np.array([5.0, 0.0]), "Reuse"),
                 (np.zeros(2), None),  # placeholder entries are ignored
             ]
         }
-        self.assertEqual(best_action(gamma, self.root_idx, b), "Reuse")
+        self.assertEqual(best_action(gamma, self.env, b), "Reuse")
 
-    def test_best_action_falls_back_to_full_policy_if_node_has_no_points(self):
+    def test_best_action_skips_actions_not_currently_valid(self):
+        self.env.available_insp_actions = {"Inspect"}  # Verify just used
         b = np.array([1.0, 0.0])
-        other_idx = self.env.state_to_idx["done"]
-        gamma = {other_idx: [(np.array([3.0, 0.0]), "Recycle")]}
-        self.assertEqual(best_action(gamma, self.root_idx, b), "Recycle")
+        gamma = {
+            "some_node": [
+                (np.array([5.0, 0.0]), "Verify"),   # highest value, but masked out
+                (np.array([1.0, 0.0]), "Inspect"),  # lower value, but still valid
+            ]
+        }
+        self.assertEqual(best_action(gamma, self.env, b), "Inspect")
 
     def test_prompt_observation_bypasses_prompt_for_disassy_actions(self):
         with patch("builtins.input") as mock_input:

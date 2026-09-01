@@ -59,7 +59,7 @@ class ConfigTests(unittest.TestCase):
         """The same config, same true condition: a low-confidence update
         should move belief toward the truth less than a full-confidence one,
         and confidence=0 should leave belief unchanged entirely."""
-        env = AngleGrinderEnv(graph_path=self.real_graph_path, config="default")
+        env = AngleGrinderEnv(graph_path=self.real_graph_path, config="no_inspection")
         env.reset(options={"condition": "Degraded"})
         model = Model(env)
         y_idx = CONDITIONS.index("Degraded")
@@ -77,7 +77,7 @@ class ConfigTests(unittest.TestCase):
         self.assertLess(marginal_low[y_idx], marginal_full[y_idx])
 
     def test_reliable_repair_vs_reuse_maps_good_to_reuse_and_bad_to_refurbish(self):
-        env = AngleGrinderEnv(graph_path=self.real_graph_path, config="reliable_repair_vs_reuse")
+        env = AngleGrinderEnv(graph_path=self.real_graph_path, config="repair_vs_reuse")
         model = Model(env)
 
         for observed, expected_action in [("GOOD", "Reuse"), ("BAD", "Refurbished")]:

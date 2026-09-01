@@ -12,11 +12,14 @@ import numpy as np
 
 from src.configs import DEFAULT
 from src.env import (
-    ALWAYS_VALID_ACTIONS,
     CAPABILITY_TO_TYPE,
     CONDITIONS,
+    INSPECTION_ACTIONS,
     AngleGrinderEnv,
 )
+from src.pomdp import TRIAGE_ACTIONS
+
+NON_DISASSY_ACTIONS = INSPECTION_ACTIONS | set(TRIAGE_ACTIONS)  # full mask, nothing used yet
 
 
 class AngleGrinderEnvTests(unittest.TestCase):
@@ -131,21 +134,63 @@ class AngleGrinderEnvTests(unittest.TestCase):
 
     # -- action masking ------------------------------------------------------
 
-    def test_verify_inspect_triage_are_always_valid_everywhere(self):
+    def test_verify_inspect_triage_are_valid_everywhere_before_first_use(self):
+        # True right after reset(), before Verify/Inspect have been used -
+        # see the dedicated masking tests below for what changes once used.
         env = self._branching_disassy_env()
         env.reset()
 
         for state_id in ("root", "mid_a", "mid_b", "both_removed", "dead_end"):
             with self.subTest(state_id=state_id):
                 env.current_state_id = state_id
-                self.assertTrue(ALWAYS_VALID_ACTIONS.issubset(env._get_valid_actions()))
+                self.assertTrue(NON_DISASSY_ACTIONS.issubset(env._get_valid_actions()))
 
-    def test_no_further_disassy_actions_still_allows_only_always_valid_actions(self):
+    def test_no_further_disassy_actions_still_allows_only_non_disassy_actions(self):
         env = self._branching_disassy_env()
         env.reset()
         env.current_state_id = "dead_end"
 
-        self.assertEqual(env._get_valid_actions(), ALWAYS_VALID_ACTIONS)
+        self.assertEqual(env._get_valid_actions(), NON_DISASSY_ACTIONS)
+
+    def test_verify_becomes_invalid_after_use_but_inspect_still_valid(self):
+        env = self._branching_disassy_env()
+        env.reset()
+
+        env.step(env.action_to_idx["Verify"])
+
+        self.assertNotIn("Verify", env._get_valid_actions())
+        self.assertIn("Inspect", env._get_valid_actions())
+
+    def test_inspect_becomes_invalid_after_use_but_verify_still_valid(self):
+        env = self._branching_disassy_env()
+        env.reset()
+
+        env.step(env.action_to_idx["Inspect"])
+
+        self.assertNotIn("Inspect", env._get_valid_actions())
+        self.assertIn("Verify", env._get_valid_actions())
+
+    def test_repeated_verify_without_a_disassy_attempt_is_an_invalid_action(self):
+        env = self._branching_disassy_env()
+        env.reset()
+
+        env.step(env.action_to_idx["Verify"])
+        with self.assertRaises(ValueError):
+            env.step(env.action_to_idx["Verify"])
+
+    def test_disassy_attempt_refreshes_verify_and_inspect_even_on_failure(self):
+        env = self._branching_disassy_env()
+        env.reset()
+        env.step(env.action_to_idx["Verify"])
+        env.step(env.action_to_idx["Inspect"])
+        self.assertEqual(env._get_valid_actions() & {"Verify", "Inspect"}, set())
+
+        # Retry until we land on the failure branch (x unchanged) - even so,
+        # Verify/Inspect should be available again (no observation exists to
+        # tell success from failure, so both are refreshed unconditionally).
+        self._step_until(env, env.action_to_idx["Unscrew"], "root", "root")
+
+        self.assertEqual(env._get_valid_actions() & {"Verify", "Inspect"}, {"Verify", "Inspect"})
 
     # -- Disassy transitions/reward (no goal/dead-end bonuses) --------------
 
@@ -222,11 +267,14 @@ class AngleGrinderEnvTests(unittest.TestCase):
     def test_inspect_action_is_null_on_x_and_probabilistic_on_condition(self):
         env = self._branching_disassy_env()
         condition_idx = CONDITIONS.index("Pristine")
-        env.reset(options={"condition": "Pristine"})
 
         counts = Counter()
         n_trials = 3000
         for _ in range(n_trials):
+            # reset() each trial: Inspect is now usable once per disassembly
+            # cycle, so repeating it bare (no Disassy in between) would be
+            # masked out from the second trial on.
+            env.reset(options={"condition": "Pristine"})
             observation, reward, terminated, truncated, info = env.step(
                 env.action_to_idx["Inspect"]
             )
@@ -261,18 +309,16 @@ class AngleGrinderEnvTests(unittest.TestCase):
 
     # -- invalid actions -----------------------------------------------------
 
-    def test_invalid_action_ends_episode_with_penalty(self):
+    def test_invalid_action_raises_instead_of_being_modeled_as_a_penalty(self):
+        # Every real caller derives its action from this same env's own
+        # valid-actions mask, so an invalid action reaching step() means our
+        # own code is wrong - that should surface immediately as a bug, not
+        # get silently modeled as a reward penalty.
         env = self._branching_disassy_env()
-        observation, _ = env.reset()
+        env.reset()
 
-        next_observation, reward, terminated, truncated, info = env.step(
-            env.action_space.n
-        )
-
-        self.assertEqual(next_observation.shape, observation.shape)
-        self.assertEqual(reward, -100)
-        self.assertTrue(terminated)
-        self.assertFalse(truncated)
+        with self.assertRaises(ValueError):
+            env.step(env.action_space.n)
 
     # -- misc ------------------------------------------------------------
 

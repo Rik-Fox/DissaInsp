@@ -48,12 +48,11 @@ def evaluate(env, policy_path):
 
     env.reset()
     b = initial_belief(model)
-    x_idx = env.state_to_idx[env.root_state]
 
     total_reward = 0.0
     print("\n--- Evaluation Run ---")
     while True:
-        action_id = best_action(gamma, x_idx, b)
+        action_id = best_action(gamma, env, b)
         if action_id is None:
             print("No action recorded for this belief - stopping.")
             break
@@ -69,7 +68,6 @@ def evaluate(env, policy_path):
 
         o_idx = _observation_index(env, action_id, info)
         b = belief_update(model, b, action_id, o_idx)
-        x_idx = env.state_to_idx[info["state_id"]]
 
     print("--- Evaluation Complete ---")
     print(f"Total reward: {total_reward:.2f}")
@@ -77,14 +75,10 @@ def evaluate(env, policy_path):
 
 def main():
     project_root = Path(__file__).resolve().parent.parent
-
-    # Prefer a graph.pkl in the project root, then fall back to the bundled example data.
     graph_data_path = project_root / "graph.pkl"
 
     if not graph_data_path.exists():
-        print(
-            "Please place 'graph.pkl' in the project root or keep the disassembly assets under 'disassembly_graph/'."
-        )
+        print(f"Please place 'graph.pkl' in the project root ({project_root}).")
         raise SystemExit(1)
 
     env = AngleGrinderEnv(graph_path=str(graph_data_path), config="repair_vs_reuse")

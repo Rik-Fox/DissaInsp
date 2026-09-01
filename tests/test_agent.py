@@ -7,7 +7,7 @@ from pathlib import Path
 import networkx as nx
 import numpy as np
 
-from src.env import AngleGrinderEnv
+from src.env import AngleGrinderEnv, INSPECTION_ACTIONS
 from src.agent import (
     Model,
     backup,
@@ -64,6 +64,20 @@ class AgentTests(unittest.TestCase):
         z, labels = self.model.observation("Reuse")
         self.assertIsNone(z)
 
+    def test_valid_actions_masks_out_unavailable_inspection_actions(self):
+        self.model.available_insp_actions = set(INSPECTION_ACTIONS)
+        both_available = self.model.valid_actions(self.root_idx)
+        self.assertIn("Verify", both_available)
+        self.assertIn("Inspect", both_available)
+
+        self.model.available_insp_actions = {"Inspect"}
+        verify_used = self.model.valid_actions(self.root_idx)
+        self.assertNotIn("Verify", verify_used)
+        self.assertIn("Inspect", verify_used)
+        self.assertIn("Unscrew", verify_used)  # graph-defined actions unaffected
+        for triage in ("Reuse", "Refurbished", "Recycle"):
+            self.assertIn(triage, verify_used)  # always valid regardless of mask
+
     def test_disassy_reward_varies_by_source_state_and_is_zero_elsewhere(self):
         reward = self.model.reward("Unscrew")
         done_idx = self.env.state_to_idx["done"]
@@ -106,6 +120,11 @@ class AgentTests(unittest.TestCase):
         belief_sets = expand_beliefs(self.model, {}, n_trajectories=10, horizon=5)
         self.assertGreater(sum(len(v) for v in belief_sets.values()), 0)
 
+        for points in belief_sets.values():
+            for b, insp_actions in points:
+                self.assertEqual(b.shape, (self.model.space.n_s,))
+                self.assertTrue(insp_actions <= INSPECTION_ACTIONS)  # subset, possibly narrowed
+
     def test_backup_tags_each_belief_point_with_a_valid_action(self):
         belief_sets = expand_beliefs(self.model, {}, n_trajectories=10, horizon=5)
         gamma = {self.root_idx: [(np.zeros(self.model.space.n_s), None)]}
@@ -114,6 +133,11 @@ class AgentTests(unittest.TestCase):
         for x_idx, points in gamma.items():
             for alpha, action_id in points:
                 self.assertEqual(alpha.shape, (self.model.space.n_s,))
+                # Full mask (superset of whatever the point's own, possibly
+                # narrower, available_insp_actions was) - just a sanity
+                # check that this is a real action, not the specific point's
+                # own restricted context.
+                self.model.available_insp_actions = set(INSPECTION_ACTIONS)
                 self.assertIn(action_id, self.model.valid_actions(x_idx))
 
     def test_solve_prefers_refurbished_over_immediate_reuse_or_recycle_at_uniform_prior(self):

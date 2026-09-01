@@ -30,7 +30,7 @@ Gymnasium environment for simulating/training against it.
     ```
 
 4.  **Prepare Graph Data:**
-    Place your `graph.pkl` file in the project's root directory. If `graph.pkl` is not available, the system will attempt to parse the bundled `ui.html` from `disassembly_graph/disassembly_angle_grinder/disassembly_angle_grinder/ui.html` if it's present.
+    Place your `graph.pkl` file in the project's root directory.
 
 ## Running
 
@@ -68,8 +68,22 @@ since a graph node's identity is just the *set* of parts still present, the
 order parts are removed in doesn't matter, so each is a single action that
 resolves deterministically (a fixed tie-break rule, e.g. "unscrew whichever
 remaining screw sorts first") given the current `x`. `Verify`/`Inspect`/
-`Triage` aren't derived from the graph at all - they're always available,
-regardless of `x`.
+`Triage` aren't derived from the graph at all - they're not tied to any
+particular `x`.
+
+`Verify` and `Inspect` are each usable once per disassembly cycle: taking
+one masks it out until the next `Unscrew`/`Remove` attempt, which refreshes
+both again - regardless of whether that attempt actually succeeds, since
+`Unscrew`/`Remove` reveal no observation, so there'd be no way to know
+which happened without a `Verify` anyway. This stops the agent from just
+re-querying the same sensor for more confidence instead of acting on what
+it already knows or disassembling further for new information. Enforced
+throughout - the live `AngleGrinderEnv` (`available_insp_actions`), the PBVI
+planner in `agent.py` (each belief point carries its own
+`available_insp_actions`, since two points can share a belief but differ on
+which actions are still available - see `Model.valid_actions`), and
+`interface.py`'s CLI (`best_action` only considers alpha-vectors whose
+tagged action is currently valid for the live `AngleGrinderEnv`).
 
 Only `Triage` ever produces a positive reward; every other action just costs
 its own time. Once disassembly is exhausted, `Unscrew`/`Remove` simply become invalid (masked
@@ -103,14 +117,13 @@ out) and the agent is expected to inspect/verify and then triage.
   live `AngleGrinderEnv`.
 - `main.py`: Entry-point wrapper that runs `src/main.py`.
 - `graph.pkl`: The pre-computed physical disassembly graph (see data note
-  above). `disassembly_graph/` holds the bundled example assets it can also
-  be parsed from as a fallback.
-- `models/`, `ppo_disassembly_tensorboard/`: Saved models / training logs.
+  above).
+- `models/`: Saved policies.
 
 All of the illustrative numbers - disassembly success probability, Verify/
 Inspect costs, the condition→observation confusion matrix, and the Triage
 payoff table - live in `src/configs.py`, not hardcoded in `env.py`. None are
-tuned to real reliability/economics data.
+tuned to real reliability/economics data yet.
 
 Every config uses the *same* mechanism for Inspect: one fixed confusion
 matrix, Bayes-updated from a uniform `[1/3, 1/3, 1/3]` prior. How much a
@@ -125,12 +138,17 @@ not just full trust.
 
 | Config                     | What it shows                                                                                   |
 |-----------------------------|---------------------------------------------------------------------------------------------------|
-| `default`                  | Inspecting costs more than the information is worth - go straight to Triage. Even the *optimal* inspect-then-triage strategy scores lower than committing immediately given these numbers - don't be surprised if `src/interface.py` recommends skipping inspection entirely with this one. |
-| `reliable_repair_vs_reuse` | Payoffs that clearly separate outcomes - a `GOOD` reading leads to `Reuse`, a `BAD` reading leads to `Refurbished` (repair), a simplified version of triage where recycling is strickly dominated|
+| `no_inspection`            | Inspecting costs more than the information is worth - go straight to Triage. Even the *optimal* inspect-then-triage strategy scores lower than committing immediately given these numbers - don't be surprised if `src/interface.py` recommends skipping inspection entirely with this one. |
+| `repair_vs_reuse`          | Payoffs that clearly separate outcomes - a `GOOD` reading leads to `Reuse`, a `BAD` reading leads to `Refurbished` (repair), a simplified version of triage where recycling is strictly dominated. |
 
-**Performance note:** `src/agent.py`'s backup is unoptimized - it's
-noticeably slower for `Verify`, since its observation alphabet is the full
-set of physical states (`Verify` deterministically reveals `x'`), so the
-backup loops over ~1600 columns for that one action on the real graph. Fine
-for a draft/small runs, but expect it to dominate solve time at scale.
+**Performance note:** `Verify`'s observation alphabet is the full set of
+physical states (it deterministically reveals `x'`), so `backup()`'s
+per-observation "best previous alpha" search used to be a Python loop over
+~1600 columns x every alpha-vector for that one action alone - it dominated
+solve time on the real graph. It's now a single vectorized sparse-matmul
+per belief point/action instead of that nested loop (same result - see
+`_observation_cross_sum` in `src/agent.py`), which measured ~40-50x faster
+on `graph.pkl` and should scale much better as belief/alpha sets grow.
+Rebuilding each action's T/Z/R from scratch for every belief point is still
+unoptimized and a candidate for a future pass.
 

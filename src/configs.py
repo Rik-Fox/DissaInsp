@@ -54,3 +54,6 @@ REPAIR_VS_REUSE = Config(
 )
 
 CONFIGS = {c.name: c for c in [NO_INSPEC, REPAIR_VS_REUSE]}
+
+# Alias: tests/back-compat references expect a `DEFAULT` config.
+DEFAULT = NO_INSPEC
