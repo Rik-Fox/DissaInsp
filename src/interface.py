@@ -31,27 +31,36 @@ def prompt_observation(model, action_id):
     """Human-in-the-loop: Disassy actions bypass the prompt (o_null, full
     confidence); Verify/Inspect ask for both the observation and confidence."""
     details = model.env.actions[action_id]
-    if details["action_type"] == "Disassy":
-        return 0, 1.0
-
     _, obs_labels = model.observation(action_id)
     obs_labels = list(obs_labels)
-    while True:
-        raw = input(f"Observation for '{action_id}' {obs_labels}: ").strip()
-        if raw in obs_labels:
-            break
-        print(f"Invalid observation - choose one of {obs_labels}")
-    o_idx = obs_labels.index(raw)
+    
+    if details["type"] == "Verify":
+        obs_labels = ["YES", "NO"]
+        while True:
+            raw = input(f"'{action_id}' disassembly action was sucessful {obs_labels}: ").strip()
+            if raw in obs_labels:
+                break
+            print(f"Invalid observation - choose one of {obs_labels}")
+        o_idx = obs_labels.index(raw)
+        return o_idx, 1.0  # full confidence for Verify actions
 
-    while True:
-        raw_confidence = input("How confident are you (0-1)? ").strip()
-        try:
-            confidence = float(raw_confidence)
-            if 0 <= confidence <= 1:
-                return o_idx, confidence
-        except ValueError:
-            pass
-        print("Enter a number between 0 and 1.")
+    else:    
+        while True:
+            raw = input(f"Result of '{action_id}' {obs_labels}: ").strip()
+            if raw in obs_labels:
+                break
+            print(f"Invalid observation - choose one of {obs_labels}")
+        o_idx = obs_labels.index(raw)
+
+        while True:
+            raw_confidence = input("How confident are you (0-1)? ").strip()
+            try:
+                confidence = float(raw_confidence)
+                if 0 <= confidence <= 1:
+                    return o_idx, confidence
+            except ValueError:
+                pass
+            print("Enter a number between 0 and 1.")
 
 
 def run(policy_path, graph_path):
@@ -69,12 +78,13 @@ def run(policy_path, graph_path):
         print(f"AGENT DECISION: Execute action '{action_id}'")
 
         details = env.actions[action_id]
-        if details["action_type"] == "Triage":
+        if details["action_type"] == "Triage": # Triage actions end the experiment
             print(f"Episode complete - final triage action: {action_id}")
             break
-
-        o_idx, confidence = prompt_observation(model, action_id)
-        b = belief_update(model, b, action_id, o_idx, confidence)
+        
+        if details["action_type"] == "Insp": # Disassy actions bypass the cmd prompt
+            o_idx, confidence = prompt_observation(model, action_id)
+            b = belief_update(model, b, action_id, o_idx, confidence)
 
         # No live env.step() here (a human supplies the observation), so
         # env's own mask state must be updated by hand.
@@ -98,4 +108,15 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Interactive PBVI policy tester")
+    parser.add_argument("--policy", required=True, help="Path to a saved Gamma policy (pickle)")
+    parser.add_argument("--graph", default="graph.pkl", help="Path to graph.pkl")
+    test_arguments = [
+        "--policy", "/home/foxrz/DissaInsp/models/disassembly_policy.pkl", 
+        "--graph", "graph.pkl"
+    ]
+    args = parser.parse_args(test_arguments)
+    run(args.policy, args.graph)
+    
+    
+    # main()

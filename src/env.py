@@ -138,32 +138,20 @@ class AngleGrinderEnv(gym.Env):
             obs[self.part_to_idx[part_name]] = 1
         return obs
 
-    def _null_obs(self):
-        """Uninformative observation: returned when an action reveals nothing
-        about x (Disassy/Triage actions, and Inspect which only reveals y)."""
-        return np.zeros(len(self.part_list), dtype=np.int8)
-
     def _get_info(self, condition_observation=None):
         """Info dict with the current state id, action mask, and (if
         applicable) the condition observation from an Inspect action."""
         return {
             "state_id": self.current_state_id,
-            "action_mask": self._get_valid_actions_mask(),
+            "valid_action": self._get_valid_actions(),
             "condition_observation": condition_observation,
         }
 
     def _get_valid_actions(self):
-        """Graph-defined Disassy actions at this node, plus Triage and
-        whichever of Verify/Inspect haven't been used this cycle."""
+        """Union of disassy actions at this node and Triage and
+        whichever of Verify/Inspect are available."""
         disassy_actions = set(self.disassy_by_state[self.current_state_id].keys())
         return disassy_actions | self.available_insp_actions | set(TRIAGE_ACTIONS)
-
-    def _get_valid_actions_mask(self):
-        """Binary mask over action_list for the currently valid actions."""
-        mask = np.zeros(len(self.action_list), dtype=np.int8)
-        for action_id in self._get_valid_actions():
-            mask[self.action_to_idx[action_id]] = 1
-        return mask
 
     def _normalize_action_details(self, action_id):
         """Copy of the action dict with 'type' lowercased for branching."""
@@ -229,9 +217,6 @@ class AngleGrinderEnv(gym.Env):
         action_id = self.idx_to_action.get(action)
 
         if action_id not in self._get_valid_actions():
-            # Every real caller derives action_id from this same mask, so
-            # reaching here means our own code is wrong - raise, don't
-            # model it as a reward penalty.
             raise ValueError(
                 f"Invalid action {action_id!r} at state {self.current_state_id!r} - "
                 f"valid actions are {sorted(self._get_valid_actions())}"
@@ -242,6 +227,8 @@ class AngleGrinderEnv(gym.Env):
         terminated = False
         truncated = False
         condition_observation = None
+        # reveals nothing about x only updated on verify action
+        observation = np.zeros(len(self.part_list), dtype=np.int8)  
 
         if category == "Triage":
             # Only source of positive reward; invalid condition/action combos read 0.
@@ -249,7 +236,7 @@ class AngleGrinderEnv(gym.Env):
             y_idx = CONDITIONS.index(self.condition)
             payoff = self.reward_model.triage(action_id, CONDITIONS)
             reward = float(payoff[self.joint_space.index(x_idx, y_idx)])
-            observation = self._null_obs()
+            observation = np.zeros(len(self.part_list), dtype=np.int8)
             terminated = True
         elif category == "Insp":
             # Verify/Inspect never change the physical state x.
@@ -258,14 +245,13 @@ class AngleGrinderEnv(gym.Env):
                 observation = self._get_obs()  # reveal the physical state x
             else:  # "inspect"
                 condition_observation = self._sample_condition_observation()
-                observation = self._null_obs()  # reveals nothing about x
             self.available_insp_actions.discard(action_id)  # unavailable until next Disassy attempt
         else:
             # Disassembly action: updates x but reveals no observation.
             edge = self.disassy_by_state[self.current_state_id][action_id]
             reward = self.reward_model.flat_cost(edge["time"])
             self.current_state_id = self._sample_next_state(action_id)
-            observation = self._null_obs()
+            observation = np.zeros(len(self.part_list), dtype=np.int8)
             self.available_insp_actions = set(INSPECTION_ACTIONS)  # refreshed either way
 
         info = self._get_info(condition_observation)

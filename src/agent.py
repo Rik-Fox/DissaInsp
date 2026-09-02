@@ -37,38 +37,45 @@ class Model:
         return disassy | self.available_insp_actions | set(TRIAGE_ACTIONS)
 
     def transition(self, action_id):
-        """Sparse (n_s, n_s) T matrix, or None for Triage (terminal - no
-        continuation value)."""
+        
         if action_id not in self._transition_cache:
-            self._transition_cache[action_id] = self._build_transition(action_id)
+            details = self.env.actions[action_id]
+            transition_martix = None
+            if details["action_type"] == "Triage":
+                pass
+            elif details["action_type"] == "Disassy":
+                transition_martix = self.env._disassy_transition_matrix(action_id)
+            else:  # Verify/Inspect
+                transition_martix = self.env.transition_model.identity()  # Insp: x', y' = x, y
+            self._transition_cache[action_id] = transition_martix
+            
         return self._transition_cache[action_id]
-
-    def _build_transition(self, action_id):
-        details = self.env.actions[action_id]
-        if details["action_type"] == "Triage":
-            return None
-        if details["action_type"] == "Disassy":
-            return self.env._disassy_transition_matrix(action_id)
-        return self.env.transition_model.identity()  # Insp: x', y' = x, y
-
+    
     def observation(self, action_id):
         """(sparse (n_s, n_o) Z matrix, observation labels), or (None, None)
         for Triage (terminal - no observation)."""
         if action_id not in self._observation_cache:
-            self._observation_cache[action_id] = self._build_observation(action_id)
+            details = self.env.actions[action_id]
+            Z_matrix, obs_labels = None, None
+            
+            if details["action_type"] == "Triage":
+                pass
+            
+            elif details["type"] == "Inspect":
+                Z_matrix, obs_labels = self.env._condition_obs_matrix, CONDITION_OBS
+                
+            elif details["type"] == "Verify": # o = x' directly (deterministic identity map) - see env.py.
+                z_x = sp.identity(self.space.n_x, format="csr")
+                Z_matrix, obs_labels = self.env.observation_model.verification(z_x), self.env.state_list
+                
+            else:  # Disassy: no observation, but PBVI expects a Z matrix for every action.
+                Z_matrix, obs_labels = self.env.observation_model.null(1), ["null"]
+            
+            self._observation_cache[action_id] = Z_matrix, obs_labels
+            
         return self._observation_cache[action_id]
 
-    def _build_observation(self, action_id):
-        details = self.env.actions[action_id]
-        if details["action_type"] == "Triage":
-            return None, None
-        if details["type"] == "Inspect":
-            return self.env._condition_obs_matrix, CONDITION_OBS
-        if details["type"] == "Verify":
-            # o = x' directly (deterministic identity map) - see env.py.
-            z_x = sp.identity(self.space.n_x, format="csr")
-            return self.env.observation_model.verification(z_x), self.env.state_list
-        return self.env.observation_model.null(1), ["null"]  # Disassy
+        
 
     def reward(self, action_id):
         """(n_s,) reward vector for this action, from pomdp.RewardModel."""
@@ -126,8 +133,7 @@ def belief_update(model, b, action_id, o_idx, confidence=1.0):
 def expand_beliefs(model, belief_sets, n_trajectories=20, horizon=10, epsilon=0.05, rng=None):
     """Phase 1: random-policy Monte Carlo rollouts, growing belief_sets =
     {x_idx: [(belief_vector, available_insp_actions), ...]} with L1-distance
-    pruning (points differing only in available_insp_actions are kept
-    separate)."""
+    pruning """
     rng = rng or np.random.default_rng()
 
     for _ in range(n_trajectories):
@@ -153,13 +159,14 @@ def expand_beliefs(model, belief_sets, n_trajectories=20, horizon=10, epsilon=0.
             x_idx = most_likely_x(model, b)
 
             if details["action_type"] == "Disassy":
-                model.available_insp_actions = set(INSPECTION_ACTIONS)  # refreshed either way
+                model.available_insp_actions = set(INSPECTION_ACTIONS)
             else:  # Insp: unavailable until the next Disassy attempt
                 model.available_insp_actions.discard(action_id)
 
             # Snapshot: model.available_insp_actions keeps changing after this.
             insp_snapshot = frozenset(model.available_insp_actions)
             points = belief_sets.setdefault(x_idx, [])
+            # L1-distance pruning: only add if this belief is sufficiently different from all existing points.
             is_new = all(
                 existing_insp != insp_snapshot or np.abs(b - existing_b).sum() >= epsilon
                 for existing_b, existing_insp in points
@@ -168,20 +175,6 @@ def expand_beliefs(model, belief_sets, n_trajectories=20, horizon=10, epsilon=0.
                 points.append((b, insp_snapshot))
 
     return belief_sets
-
-
-def _all_alphas(gamma):
-    for points in gamma.values():
-        for alpha, action_id in points:
-            yield alpha, action_id
-
-
-def _stack_alphas(gamma, n_s):
-    """Every alpha-vector with a real action, stacked into one (n_alphas,
-    n_s) matrix - built once per backup() sweep rather than per point."""
-    alphas = [alpha for alpha, action_id in _all_alphas(gamma) if action_id is not None]
-    return np.array(alphas) if alphas else np.empty((0, n_s))
-
 
 def _observation_cross_sum(prev_alphas, T, Z, b, discount):
     """Vectorized PBVI cross-sum: for each observation, picks whichever
@@ -213,7 +206,11 @@ def backup(model, belief_sets, gamma, discount=0.95):
     action (and best previous alpha-vector per observation) maximizing
     value there, keeping just that one alpha-vector per point."""
     new_gamma = {x_idx: [] for x_idx in belief_sets}
-    prev_alphas = _stack_alphas(gamma, model.space.n_s)
+    
+    all_alphas = [(alpha, action_id) for points in gamma.values() for alpha, action_id in points]
+    
+    non_terminal_alphas = [alpha for alpha, action_id in all_alphas if action_id is not None]
+    prev_alphas = np.array(non_terminal_alphas) if non_terminal_alphas else np.empty((0, model.space.n_s)) #
 
     for x_idx, points in belief_sets.items():
         for b, insp_actions in points:
