@@ -86,10 +86,9 @@ def main():
     save_dir = project_root / "models"
     save_dir.mkdir(exist_ok=True)
 
-    # --- 1. Train a new policy ---
-    train(env, n_iterations=15, n_trajectories=10, horizon=15, save_path=str(save_dir))
+    # 45 is 15*3 for maximum depth of 15 parts with all verified and inspected
+    train(env, n_iterations=45, n_trajectories=1000, horizon=45, save_path=str(save_dir))
 
-    # --- 2. Evaluate the final trained policy ---
     evaluate(env, str(save_dir / "disassembly_policy.pkl"))
 
 

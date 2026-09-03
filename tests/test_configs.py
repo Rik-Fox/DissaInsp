@@ -35,7 +35,7 @@ class ConfigTests(unittest.TestCase):
                 env.condition = true_condition  # ground truth for sampling
                 o_idx = ["GOOD", "OK", "BAD"].index(env._sample_condition_observation())
                 b = belief_update(model, b, "Inspect", o_idx)
-            marginal = b.reshape(model.space.n_y, model.space.n_x).sum(axis=1)
+            marginal = b
             totals.append(marginal[y_idx])
         return sum(totals) / len(totals)
 
@@ -72,15 +72,13 @@ class ConfigTests(unittest.TestCase):
 
         b_low = belief_update(model, b0, "Inspect", o_idx, confidence=0.2)
         b_full = belief_update(model, b0, "Inspect", o_idx, confidence=1.0)
-        marginal_low = b_low.reshape(model.space.n_y, model.space.n_x).sum(axis=1)
-        marginal_full = b_full.reshape(model.space.n_y, model.space.n_x).sum(axis=1)
-        self.assertLess(marginal_low[y_idx], marginal_full[y_idx])
+        self.assertLess(b_low[y_idx], b_full[y_idx])
 
     def test_reliable_repair_vs_reuse_maps_good_to_reuse_and_bad_to_refurbish(self):
         env = AngleGrinderEnv(graph_path=self.real_graph_path, config="repair_vs_reuse")
         model = Model(env)
 
-        for observed, expected_action in [("GOOD", "Reuse"), ("BAD", "Refurbished")]:
+        for observed, expected_action in [("GOOD", "Reuse"), ("OK", "Refurbished"), ("BAD", "Recycle")]:
             b0 = initial_belief(model)
             b = belief_update(model, b0, "Inspect", ["GOOD", "OK", "BAD"].index(observed))
             values = {a: float(b @ model.reward(a)) for a in ("Reuse", "Refurbished", "Recycle")}

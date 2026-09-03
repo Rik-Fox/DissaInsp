@@ -102,17 +102,14 @@ out) and the agent is expected to inspect/verify and then triage.
   with. Loads `graph.pkl` + a `Config`, builds the 7-action space, and calls
   into `pomdp.py` for every reward/transition/observation calculation so the
   simulator and the planner agree on semantics.
-- `src/agent.py`: A Point-Based Value Iteration (PBVI) solver - `Model` adapts
-  an `AngleGrinderEnv`'s per-action T/Z/R into the matrices a POMDP solver
-  needs; `solve()` alternates Monte Carlo belief expansion (with L1-distance
-  pruning) and point-based value backups, producing a set of alpha-vectors
-  (`Gamma`) that can be saved/loaded via `save_policy`/`load_policy`. A draft
-  reference implementation, not a tuned/optimized solver - see the
-  performance note below.
-- `src/interface.py`: An interactive REPL that loads a saved `Gamma`, picks
-  the best action for the live belief, and - for Verify/Inspect - prompts a
-  human operator for the real-world observation and their confidence in it,
-  feeding both back through the same belief update used during training.
+- `src/agent.py`: Factored Point-Based Value Iteration (PBVI) solver. Adapts
+  `AngleGrinderEnv` into explicit factored models over physical state $X$ and condition $Y$;
+  `solve()` alternates Monte Carlo belief expansion (with L1-distance pruning) and
+  factored Bellman backups, producing partitioned 3D alpha-vectors (`Gamma`) saved/loaded
+  via `save_policy`/`load_policy`.
+- `src/interface.py`: An interactive REPL that loads a saved `Gamma`, translates CAD part
+  names to English, and prompts a human operator for real-world observations and confidence,
+  scaling confidence into the Bayesian belief update.
 - `src/main.py`: Trains a policy (`agent.solve`) and evaluates it against the
   live `AngleGrinderEnv`.
 - `main.py`: Entry-point wrapper that runs `src/main.py`.
@@ -120,35 +117,40 @@ out) and the agent is expected to inspect/verify and then triage.
   above).
 - `models/`: Saved policies.
 
-All of the illustrative numbers - disassembly success probability, Verify/
-Inspect costs, the condition→observation confusion matrix, and the Triage
-payoff table - live in `src/configs.py`, not hardcoded in `env.py`. None are
-tuned to real reliability/economics data yet.
+## Factored PBVI & State Updates
 
-Every config uses the *same* mechanism for Inspect: one fixed confusion
-matrix, Bayes-updated from a uniform `[1/3, 1/3, 1/3]` prior. How much a
-single reading moves that belief isn't a property of the config, though - it's
-a `confidence` weight (0-1) passed into `agent.belief_update` at update time
-(a "tempered" Bayes update, `b'(y) ∝ b(y) · P(o|y)^confidence`). `confidence=1`
-is a full update, `confidence=0` ignores the reading entirely. `src/interface.py`
-asks a human operator for this alongside their observation; during training,
-`agent.expand_beliefs` samples it randomly per reading, so the learned policy
-sees belief points reflecting a whole range of possible operator confidence,
-not just full trust.
+The state space factors into physical configuration $x \in X$ ($|X| = 1664$) and hidden condition $y \in Y$ ($|Y| = 3$: `Pristine`, `Serviceable`, `Degraded`).
 
-| Config                     | What it shows                                                                                   |
-|-----------------------------|---------------------------------------------------------------------------------------------------|
-| `no_inspection`            | Inspecting costs more than the information is worth - go straight to Triage. Even the *optimal* inspect-then-triage strategy scores lower than committing immediately given these numbers - don't be surprised if `src/interface.py` recommends skipping inspection entirely with this one. |
-| `repair_vs_reuse`          | Payoffs that clearly separate outcomes - a `GOOD` reading leads to `Reuse`, a `BAD` reading leads to `Refurbished` (repair), a simplified version of triage where recycling is strictly dominated. |
+Rather than maintaining an intractable 4992-dimensional joint belief vector and 4992D alpha-vectors, the solver uses **Factored PBVI**:
+- **State Updates**: Physical state $x$ is explicitly tracked by the assembly graph (`env.current_state_id`, `most_likely_x(model)`). Physical transitions occur on `Disassy` actions (`Unscrew`, `Remove`) based on graph edges and success probability `p_success`. Condition belief $b \in \Delta^2$ is updated Bayesianly upon `Inspect` actions. `Verify` confirms the physical state $x$ without altering condition belief.
+- **Factored 3D Alpha-Vectors**: Beliefs $b$ and value vectors $\alpha \in \mathbb{R}^3$ are strictly 3-dimensional over condition states $Y$. The policy partitions alpha-vectors by physical state node: $\Gamma(x) = \{(\alpha, a)\}$.
+- **Continuation Bellman Backups**:
+  - `Disassy`: Projects continuation across physical successor states:
+    $$\alpha(y) = R(x, a, y) + \gamma \left[ p_\text{succ} \alpha^*(x_\text{succ}, y) + (1 - p_\text{succ}) \alpha^*(x_\text{fail}, y) \right]$$
+  - `Inspect` / `Verify`: Evaluates continuation within the current physical node $x$, cross-summing over observation matrices $Z$:
+    $$\alpha(y) = R(a, y) + \gamma \sum_o Z(y, o) \alpha_o^*(x, y)$$
+  - **Dynamic Action Masking**: Continuation vectors during backups explicitly enforce `available_insp_actions`, preventing invalid action chaining (e.g. `Verify` hallucinating an immediate second `Inspect` without an intervening `Disassy`).
 
-**Performance note:** `Verify`'s observation alphabet is the full set of
-physical states (it deterministically reveals `x'`), so `backup()`'s
-per-observation "best previous alpha" search used to be a Python loop over
-~1600 columns x every alpha-vector for that one action alone - it dominated
-solve time on the real graph. It's now a single vectorized sparse-matmul
-per belief point/action instead of that nested loop (same result - see
-`_observation_cross_sum` in `src/agent.py`), which measured ~40-50x faster
-on `graph.pkl` and should scale much better as belief/alpha sets grow.
-Rebuilding each action's T/Z/R from scratch for every belief point is still
-unoptimized and a candidate for a future pass.
+## Config Balancing & Confidence Scaling
+
+### Config Balancing (`src/configs.py`)
+- **Preserved Physical Costs**: Disassembly action times from `graph.pkl` are preserved as real physical durations (e.g. $-24$s per screw, $-33$s to $-51$s for housing removal).
+- **Inspection & Verification Costs**: Configured to reflect realistic operational trade-offs (`inspect_cost = 28.0`, `verify_cost = 6.0`). Inspecting is more costly than a single screw removal, requiring the agent to balance diagnostic value against exploratory disassembly.
+- **Calibrated Triage Payoffs (`repair_vs_reuse`)**:
+  - `Reuse`: Pristine $+650.0$, Serviceable $+20.0$, Degraded $-600.0$
+  - `Refurbished`: Pristine $+20.0$, Serviceable $+350.0$, Degraded $-180.0$ (reflecting the net negative return of attempting to refurbish degraded units)
+  - `Recycle`: Pristine $+20.0$, Serviceable $+20.0$, Degraded $+20.0$
+
+### Confidence Scaling (`CONFIDENCE_SCALE = 0.3`)
+In Bayesian belief updating, a raw human confidence entry (e.g. $0.5$) can aggressively shift belief in just 1-2 steps, causing an agent to prematurely triage before removing key components.
+
+A centralized constant `CONFIDENCE_SCALE = 0.3` in `src/configs.py` scales confidence into a tempered likelihood exponent:
+$$b'(y) \propto b(y) \cdot P(o \mid y)^{\text{confidence} \times \text{CONFIDENCE\_SCALE}}$$
+This scaling is applied consistently across:
+1. Monte Carlo belief expansion rollouts (`agent.expand_beliefs`)
+2. PBVI Bellman backup cross-sums (`agent._observation_cross_sum`)
+3. Live evaluation rollouts (`main.py`)
+4. Interactive human CLI prompts (`src/interface.py`)
+
+This calibration ensures that operator inputs guide the policy to progressively disassemble multiple fasteners (e.g. unscrewing 3-4 screws and removing subassemblies) to gain diagnostic confidence before committing to a final triage decision.
 

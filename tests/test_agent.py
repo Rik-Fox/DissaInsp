@@ -7,7 +7,8 @@ from pathlib import Path
 import networkx as nx
 import numpy as np
 
-from src.env import AngleGrinderEnv, INSPECTION_ACTIONS
+from src.configs import CONFIDENCE_SCALE
+from src.env import AngleGrinderEnv, CONDITIONS, INSPECTION_ACTIONS
 from src.agent import (
     Model,
     backup,
@@ -44,25 +45,28 @@ class AgentTests(unittest.TestCase):
     # -- Model adapter --------------------------------------------------
 
     def test_transition_shapes_and_categories(self):
-        n_s = self.model.space.n_s
-        self.assertEqual(self.model.transition("Unscrew").shape, (n_s, n_s))
-        self.assertEqual(self.model.transition("Verify").shape, (n_s, n_s))
-        self.assertIsNone(self.model.transition("Reuse"))  # Triage: terminal
+        t_unscrew = self.model.transition("Unscrew", self.root_idx)
+        self.assertEqual(t_unscrew["type"], "disassy")
+        self.assertEqual(t_unscrew["succ_idx"], self.env.state_to_idx["done"])
+        self.assertEqual(t_unscrew["fail_idx"], self.root_idx)
+        self.assertEqual(self.model.transition("Verify")["type"], "identity")
+        self.assertEqual(self.model.transition("Reuse")["type"], "terminal")
 
     def test_observation_alphabets(self):
         z, labels = self.model.observation("Inspect")
-        self.assertEqual(z.shape, (self.model.space.n_s, 3))
+        self.assertEqual(z.shape, (len(CONDITIONS), 3))
         self.assertEqual(labels, ["GOOD", "OK", "BAD"])
 
         z, labels = self.model.observation("Verify")
-        self.assertEqual(z.shape, (self.model.space.n_s, self.model.space.n_x))
-        self.assertEqual(labels, self.env.state_list)
+        self.assertEqual(z.shape, (2, 2))
+        self.assertEqual(labels, ["YES", "NO"])
 
         z, labels = self.model.observation("Unscrew")
-        self.assertEqual(z.shape, (self.model.space.n_s, 1))
+        self.assertEqual(z.shape, (len(CONDITIONS), 1))
 
         z, labels = self.model.observation("Reuse")
-        self.assertIsNone(z)
+        self.assertEqual(z.shape, (len(CONDITIONS), 1))
+        self.assertEqual(labels, ["null"])
 
     def test_valid_actions_masks_out_unavailable_inspection_actions(self):
         self.model.available_insp_actions = set(INSPECTION_ACTIONS)
@@ -79,40 +83,42 @@ class AgentTests(unittest.TestCase):
             self.assertIn(triage, verify_used)  # always valid regardless of mask
 
     def test_disassy_reward_varies_by_source_state_and_is_zero_elsewhere(self):
-        reward = self.model.reward("Unscrew")
-        done_idx = self.env.state_to_idx["done"]
-        # cost only applies at "root" (where the edge is defined), 0 at "done"
-        for y_idx in range(self.model.space.n_y):
-            self.assertEqual(reward[self.model.space.index(self.root_idx, y_idx)], -2.0)
-            self.assertEqual(reward[self.model.space.index(done_idx, y_idx)], 0.0)
+        reward = self.model.reward("Unscrew", self.root_idx)
+        np.testing.assert_array_equal(reward, np.full(len(CONDITIONS), -2.0))
 
     def test_triage_reward_matches_payoff_table(self):
-        reward = self.model.reward("Reuse")
-        y_idx = 0  # Pristine
-        self.assertEqual(reward[self.model.space.index(self.root_idx, y_idx)], 10.0)
+        reward = self.model.reward("Reuse", self.root_idx)
+        self.assertEqual(reward[0], 10.0)
 
     # -- belief tracking ---------------------------------------------------
 
     def test_initial_belief_is_uniform_over_y_at_root(self):
         b0 = initial_belief(self.model)
+        self.assertEqual(b0.shape, (len(CONDITIONS),))
         self.assertAlmostEqual(b0.sum(), 1.0)
-        marginal = b0.reshape(self.model.space.n_y, self.model.space.n_x).sum(axis=1)
-        np.testing.assert_allclose(marginal, [1 / 3, 1 / 3, 1 / 3])
+        np.testing.assert_allclose(b0, [1 / 3, 1 / 3, 1 / 3])
 
     def test_repeated_bad_inspections_concentrate_belief_on_degraded(self):
         b = initial_belief(self.model)
         bad_idx = ["GOOD", "OK", "BAD"].index("BAD")
-        for _ in range(5):
+        for _ in range(15):
             b = belief_update(self.model, b, "Inspect", bad_idx)
 
-        marginal = b.reshape(self.model.space.n_y, self.model.space.n_x).sum(axis=1)
-        self.assertGreater(marginal[2], 0.999)  # Degraded
+        self.assertGreater(b[2], 0.8)  # Degraded
+
+    def test_confidence_scaling_in_belief_update(self):
+        """Checks that CONFIDENCE_SCALE is applied to Bayesian updates."""
+        b = initial_belief(self.model)
+        b_scaled = belief_update(self.model, b, "Inspect", 0, confidence=0.5)
+        z, _ = self.model.observation("Inspect")
+        expected_likelihood = z[:, 0] ** (0.5 * CONFIDENCE_SCALE)
+        expected = (expected_likelihood * b) / (expected_likelihood * b).sum()
+        np.testing.assert_allclose(b_scaled, expected)
 
     def test_most_likely_x_tracks_disassy_transitions(self):
-        b = initial_belief(self.model)
-        b = belief_update(self.model, b, "Unscrew", 0)  # o_null, only one column
-        # After Unscrew, x' is stochastic - either root (fail) or done (success).
-        self.assertIn(most_likely_x(self.model, b), (self.root_idx, self.env.state_to_idx["done"]))
+        self.assertEqual(most_likely_x(self.model), self.root_idx)
+        self.env.current_state_id = "done"
+        self.assertEqual(most_likely_x(self.model), self.env.state_to_idx["done"])
 
     # -- solving ----------------------------------------------------------
 
@@ -122,17 +128,17 @@ class AgentTests(unittest.TestCase):
 
         for points in belief_sets.values():
             for b, insp_actions in points:
-                self.assertEqual(b.shape, (self.model.space.n_s,))
+                self.assertEqual(b.shape, (len(CONDITIONS),))
                 self.assertTrue(insp_actions <= INSPECTION_ACTIONS)  # subset, possibly narrowed
 
     def test_backup_tags_each_belief_point_with_a_valid_action(self):
         belief_sets = expand_beliefs(self.model, {}, n_trajectories=10, horizon=5)
-        gamma = {self.root_idx: [(np.zeros(self.model.space.n_s), None)]}
+        gamma = {self.root_idx: [(np.zeros(len(CONDITIONS)), None)]}
         gamma = backup(self.model, belief_sets, gamma)
 
         for x_idx, points in gamma.items():
             for alpha, action_id in points:
-                self.assertEqual(alpha.shape, (self.model.space.n_s,))
+                self.assertEqual(alpha.shape, (len(CONDITIONS),))
                 # Full mask (superset of whatever the point's own, possibly
                 # narrower, available_insp_actions was) - just a sanity
                 # check that this is a real action, not the specific point's

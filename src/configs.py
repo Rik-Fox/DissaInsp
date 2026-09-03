@@ -4,6 +4,9 @@ None are real. Belief confidence is handled by agent.belief_update's
 """
 from dataclasses import dataclass
 
+# Tunable multiplier mapping confidence (0-1) to Bayesian evidence exponent.
+CONFIDENCE_SCALE = 0.3
+
 
 @dataclass
 class Config:
@@ -37,19 +40,19 @@ NO_INSPEC = Config(
 # Payoffs that clearly separate outcomes: GOOD -> Reuse, BAD -> Refurbished, Recycle is strictly dominated
 REPAIR_VS_REUSE = Config(
     name="repair_vs_reuse",
-    description="Payoffs that clearly favor Refurbish when degraded, Reuse when not.",
+    description="Payoffs that balance real disassembly costs against diagnostic confidence.",
     disassy_success_prob=0.9,
-    verify_cost=0.5,
-    inspect_cost=0.3,
+    verify_cost=6,
+    inspect_cost=28,
     triage_payoff={
-        "Reuse":       {"Pristine": 12.0, "Serviceable": 1.0, "Degraded": -8.0},
-        "Refurbished": {"Pristine": 4.0,  "Serviceable": 9.0, "Degraded": 7.0},
-        "Recycle":     {"Pristine": 0.0,  "Serviceable": 0.5, "Degraded": 2.0},
+        "Reuse":       {"Pristine": 650.0, "Serviceable": 20.0,  "Degraded": -600.0},
+        "Refurbished": {"Pristine": 20.0,  "Serviceable": 350.0, "Degraded": -180.0},
+        "Recycle":     {"Pristine": 20.0,  "Serviceable": 20.0,  "Degraded": 20.0},
     },
     condition_obs_matrix=[
-        [0.92, 0.06, 0.02],
-        [0.05, 0.90, 0.05],
-        [0.02, 0.06, 0.92],
+        [0.75, 0.15, 0.1],
+        [0.125, 0.75, 0.125],
+        [0.1, 0.15, 0.75],
     ],
 )
 

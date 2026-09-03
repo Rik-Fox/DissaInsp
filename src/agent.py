@@ -1,232 +1,190 @@
-"""Point-Based Value Iteration (PBVI) solver for the disassembly/triage
-POMDP, built on the sparse T/Z/R matrices from a loaded AngleGrinderEnv.
-Belief points are (belief_vector, available_insp_actions) pairs - see
-README for the model/algorithm description. Draft/reference
-implementation, not tuned/optimized.
-"""
+"""Factored PBVI solver using explicit T, Z, and R models."""
 import pickle
 
 import numpy as np
-import scipy.sparse as sp
 from tqdm import tqdm
 
+from .configs import CONFIDENCE_SCALE
 from .env import CONDITION_OBS, CONDITIONS, INSPECTION_ACTIONS
 from .pomdp import TRIAGE_ACTIONS
 
 
 class Model:
-    """Adapts an AngleGrinderEnv's per-action T/Z/R into the sparse
-    matrices/vectors the PBVI solver needs, reusing env.py's builders.
-    Caches per action_id, since none of them depend on x_idx or a belief
-    point.
-    """
+    """Adapts AngleGrinderEnv for factored PBVI over condition Y."""
 
     def __init__(self, env):
         self.env = env
         self.space = env.joint_space
-        self._transition_cache = {}
-        self._observation_cache = {}
-        self._reward_cache = {}
-        # Verify/Inspect currently available - mirrors AngleGrinderEnv's own field.
-        self.available_insp_actions = set(INSPECTION_ACTIONS)
+        self.available_insp_actions = {"Inspect"}
 
     def valid_actions(self, x_idx):
-        """Disassy actions at x_idx, union available insp actions, union Triage."""
+        """Returns valid action set for state index x_idx."""
         state_id = self.env.state_list[x_idx]
         disassy = set(self.env.disassy_by_state[state_id].keys())
         return disassy | self.available_insp_actions | set(TRIAGE_ACTIONS)
 
-    def transition(self, action_id):
-        
-        if action_id not in self._transition_cache:
-            details = self.env.actions[action_id]
-            transition_martix = None
-            if details["action_type"] == "Triage":
-                pass
-            elif details["action_type"] == "Disassy":
-                transition_martix = self.env._disassy_transition_matrix(action_id)
-            else:  # Verify/Inspect
-                transition_martix = self.env.transition_model.identity()  # Insp: x', y' = x, y
-            self._transition_cache[action_id] = transition_martix
-            
-        return self._transition_cache[action_id]
-    
-    def observation(self, action_id):
-        """(sparse (n_s, n_o) Z matrix, observation labels), or (None, None)
-        for Triage (terminal - no observation)."""
-        if action_id not in self._observation_cache:
-            details = self.env.actions[action_id]
-            Z_matrix, obs_labels = None, None
-            
-            if details["action_type"] == "Triage":
-                pass
-            
-            elif details["type"] == "Inspect":
-                Z_matrix, obs_labels = self.env._condition_obs_matrix, CONDITION_OBS
-                
-            elif details["type"] == "Verify": # o = x' directly (deterministic identity map) - see env.py.
-                z_x = sp.identity(self.space.n_x, format="csr")
-                Z_matrix, obs_labels = self.env.observation_model.verification(z_x), self.env.state_list
-                
-            else:  # Disassy: no observation, but PBVI expects a Z matrix for every action.
-                Z_matrix, obs_labels = self.env.observation_model.null(1), ["null"]
-            
-            self._observation_cache[action_id] = Z_matrix, obs_labels
-            
-        return self._observation_cache[action_id]
-
-        
-
-    def reward(self, action_id):
-        """(n_s,) reward vector for this action, from pomdp.RewardModel."""
-        if action_id not in self._reward_cache:
-            self._reward_cache[action_id] = self._build_reward(action_id)
-        return self._reward_cache[action_id]
-
-    def _build_reward(self, action_id):
+    def transition(self, action_id, x_idx=None):
+        """Returns transition operator T for action at node x_idx."""
         details = self.env.actions[action_id]
         if details["action_type"] == "Triage":
-            return self.env.reward_model.triage(action_id, CONDITIONS)
-        if details["action_type"] == "Disassy":
-            # Cost varies by source state; 0 where this action isn't defined there.
-            cost_per_x = np.zeros(self.space.n_x)
-            for state_id, edges in self.env.disassy_by_state.items():
-                edge = edges.get(action_id)
-                if edge is not None:
-                    x_idx = self.env.state_to_idx[state_id]
-                    cost_per_x[x_idx] = self.env.reward_model.flat_cost(edge["time"])
-            cost_matrix = np.tile(cost_per_x.reshape(-1, 1), (1, self.space.n_y))
-            return cost_matrix.reshape(-1, order="F")  # y-major, x-minor
-        cost = self.env.reward_model.flat_cost(details["time"])  # Insp: same everywhere
-        return np.full(self.space.n_s, cost)
+            return {"type": "terminal"}
+        if details["action_type"] == "Disassy" and x_idx is not None:
+            state_id = self.env.state_list[x_idx]
+            edge = self.env.disassy_by_state[state_id][action_id]
+            succ_idx = self.env.state_to_idx[edge["next_state"]]
+            p_success = float(self.env.config.disassy_success_prob)
+            return {"type": "disassy", "succ_idx": succ_idx, "fail_idx": x_idx, "p_success": p_success}
+        return {"type": "identity", "x_idx": x_idx}
+
+    def observation(self, action_id):
+        """Returns observation matrix Z and labels for action."""
+        details = self.env.actions[action_id]
+        if details["type"] == "Inspect":
+            return np.asarray(self.env.config.condition_obs_matrix), CONDITION_OBS
+        if details["type"] == "Verify":
+            return np.eye(2), ["YES", "NO"]
+        return np.ones((len(CONDITIONS), 1)), ["null"]
+
+    def reward(self, action_id, x_idx=None):
+        """Returns reward/cost vector R for action across conditions."""
+        details = self.env.actions[action_id]
+        if details["action_type"] == "Triage":
+            return np.array([self.env.config.triage_payoff[action_id][y] for y in CONDITIONS], dtype=float)
+        if details["action_type"] == "Disassy" and x_idx is not None:
+            state_id = self.env.state_list[x_idx]
+            edge = self.env.disassy_by_state[state_id].get(action_id)
+            cost = float(edge["time"]) if edge else 0.0
+            return np.full(len(CONDITIONS), -cost, dtype=float)
+        cost = float(details["time"]) if details["time"] is not None else 1.0
+        return np.full(len(CONDITIONS), -cost, dtype=float)
 
 
-def initial_belief(model):
-    """b0(x, y): certainty on the root physical node, uniform over y."""
-    b0 = np.zeros(model.space.n_s)
-    x0 = model.env.state_to_idx[model.env.root_state]
-    for y_idx in range(model.space.n_y):
-        b0[model.space.index(x0, y_idx)] = 1.0 / model.space.n_y
-    return b0
+def initial_belief(model=None):
+    """Returns uniform prior condition belief vector over Y."""
+    return np.full(len(CONDITIONS), 1.0 / len(CONDITIONS), dtype=float)
 
 
-def most_likely_x(model, b):
-    """Marginalizes y out of a joint belief and returns the most likely x."""
-    marginal_x = b.reshape(model.space.n_y, model.space.n_x).sum(axis=0)
-    return int(np.argmax(marginal_x))
+def most_likely_x(model, b=None):
+    """Returns current physical state index."""
+    return int(model.env.state_to_idx[model.env.current_state_id])
 
 
 def belief_update(model, b, action_id, o_idx, confidence=1.0):
-    """b' = normalize(Z[:, o]^confidence .* (T^T b)) - tempered Bayes update.
-    confidence=1 is standard Bayes; confidence=0 ignores the observation."""
-    T = model.transition(action_id)
-    predicted = (T.T @ b) if T is not None else b
+    """Performs Bayesian update on condition belief b for action."""
+    details = model.env.actions[action_id]
+    if details["type"] != "Inspect" or confidence == 0:
+        return b
     Z, _ = model.observation(action_id)
-    if Z is None or confidence == 0:
-        return predicted
-    likelihood = np.asarray(Z[:, o_idx].power(confidence).todense()).flatten()
-    weighted = likelihood * predicted
+    # Scales confidence weight using shared CONFIDENCE_SCALE.
+    likelihood = Z[:, o_idx] ** (float(confidence) * CONFIDENCE_SCALE)
+    weighted = likelihood * b
     total = weighted.sum()
     return weighted / total if total > 0 else weighted
 
 
 def expand_beliefs(model, belief_sets, n_trajectories=20, horizon=10, epsilon=0.05, rng=None):
-    """Phase 1: random-policy Monte Carlo rollouts, growing belief_sets =
-    {x_idx: [(belief_vector, available_insp_actions), ...]} with L1-distance
-    pruning """
+    """Phase 1: Monte Carlo rollouts over (x, b_y) with L1 pruning."""
     rng = rng or np.random.default_rng()
 
     for _ in range(n_trajectories):
         b = initial_belief(model)
         x_idx = model.env.state_to_idx[model.env.root_state]
-        model.available_insp_actions = set(INSPECTION_ACTIONS)  # fresh episode
+        model.available_insp_actions = {"Inspect"}
 
         for _ in range(horizon):
-            # sorted(), not list(): set order depends on (randomized) string hashing.
             action_id = rng.choice(sorted(model.valid_actions(x_idx)))
             details = model.env.actions[action_id]
             if details["action_type"] == "Triage":
-                break  # terminal: nothing further to expand
+                break
 
-            T = model.transition(action_id)
-            predicted = (T.T @ b) if T is not None else b
+            T = model.transition(action_id, x_idx)
             Z, obs_labels = model.observation(action_id)
-            obs_dist = np.asarray((predicted @ Z)).flatten()
-            obs_dist = obs_dist / obs_dist.sum()
-            o_idx = rng.choice(len(obs_labels), p=obs_dist)
-
-            b = belief_update(model, b, action_id, o_idx, confidence=rng.uniform(0, 1))
-            x_idx = most_likely_x(model, b)
 
             if details["action_type"] == "Disassy":
+                # Stochastically transition according to T
+                if rng.random() < T["p_success"]:
+                    x_idx = T["succ_idx"]
                 model.available_insp_actions = set(INSPECTION_ACTIONS)
-            else:  # Insp: unavailable until the next Disassy attempt
-                model.available_insp_actions.discard(action_id)
 
-            # Snapshot: model.available_insp_actions keeps changing after this.
+            elif details["type"] == "Verify":
+                model.available_insp_actions.discard("Verify")
+
+            elif details["type"] == "Inspect":
+                obs_dist = b @ Z
+                o_idx = rng.choice(len(obs_labels), p=obs_dist / obs_dist.sum())
+                b = belief_update(model, b, action_id, o_idx, confidence=rng.uniform(0, 1))
+                model.available_insp_actions.discard("Inspect")
+
             insp_snapshot = frozenset(model.available_insp_actions)
             points = belief_sets.setdefault(x_idx, [])
-            # L1-distance pruning: only add if this belief is sufficiently different from all existing points.
-            is_new = all(
-                existing_insp != insp_snapshot or np.abs(b - existing_b).sum() >= epsilon
-                for existing_b, existing_insp in points
-            )
-            if is_new:
-                points.append((b, insp_snapshot))
+            # Prune duplicate belief points on condition simplex
+            if all(ex_insp != insp_snapshot or np.abs(b - ex_b).sum() >= epsilon for ex_b, ex_insp in points):
+                points.append((b.copy(), insp_snapshot))
 
     return belief_sets
 
-def _observation_cross_sum(prev_alphas, T, Z, b, discount):
-    """Vectorized PBVI cross-sum: for each observation, picks whichever
-    prior alpha-vector is best for the belief it would produce, then
-    projects the result through T once. See README performance note."""
-    if prev_alphas.shape[0] == 0:
-        return 0.0
-
-    predicted = T.T @ b
-    weighted_alphas = prev_alphas * predicted  # (n_alphas, n_s), row-broadcast
-    values = weighted_alphas @ Z  # (n_alphas, n_o) - one sparse matmul
-    best_k = np.argmax(values, axis=0)  # best prior alpha per observation
-
-    Z_csc = Z.tocsc()
-    correction = np.zeros(prev_alphas.shape[1])
-    for o_idx in range(Z_csc.shape[1]):
-        start, end = Z_csc.indptr[o_idx], Z_csc.indptr[o_idx + 1]
-        if start == end:
-            continue
-        rows = Z_csc.indices[start:end]
-        alpha_row = prev_alphas[best_k[o_idx]]
-        correction[rows] += Z_csc.data[start:end] * alpha_row[rows]
-
-    return discount * (T @ correction)
 
 
-def backup(model, belief_sets, gamma, discount=0.95):
-    """Phase 2: one PBVI backup sweep - for each belief point, picks the
-    action (and best previous alpha-vector per observation) maximizing
-    value there, keeping just that one alpha-vector per point."""
+def _observation_cross_sum(model, gamma, T, Z, b, discount, x_idx, next_insp):
+    """Computes discounted continuation value vector T @ (Z * alpha)."""
+    t_type = T["type"]
+    if t_type == "disassy":
+        # Disassembly yields null observation; continuation projects through stochastic T
+        # Disassembly refreshes inspection actions
+        succ_pts = [a for a, act in gamma.get(T["succ_idx"], []) if act is not None]
+        best_succ = max(succ_pts, key=lambda a: float(b @ a)) if succ_pts else np.zeros(len(CONDITIONS))
+        curr_pts = [a for a, act in gamma.get(T["fail_idx"], []) if act is not None]
+        best_fail = max(curr_pts, key=lambda a: float(b @ a)) if curr_pts else best_succ
+        # Expected continuation value: T @ alpha
+        expected_future = T["p_success"] * best_succ + (1.0 - T["p_success"]) * best_fail
+        return discount * expected_future
+
+    # Verify and Inspect: continuation must respect next_insp mask
+    valid_next = (model.valid_actions(x_idx) - set(INSPECTION_ACTIONS)) | next_insp
+    curr_pts = [a for a, act in gamma.get(x_idx, []) if act is not None and act in valid_next]
+
+    if Z.shape == (2, 2):
+        # Verify: identity transition on condition, evaluates current state alpha
+        best_curr = max(curr_pts, key=lambda a: float(b @ a)) if curr_pts else np.zeros(len(CONDITIONS))
+        return discount * best_curr
+
+    # Inspect: Z is (3, 3) confusion matrix over diagnostic observations
+    best_alphas_o = []
+    for o in range(Z.shape[1]):
+        likelihood = Z[:, o] ** CONFIDENCE_SCALE
+        weighted = likelihood * b
+        b_post = weighted / weighted.sum() if weighted.sum() > 0 else b
+        best_a = max(curr_pts, key=lambda a: float(b_post @ a)) if curr_pts else np.zeros(len(CONDITIONS))
+        best_alphas_o.append(best_a)
+    # correction: expected continuation payoff at condition y across observations Z
+    correction = np.array([sum(Z[y, o] * best_alphas_o[o][y] for o in range(Z.shape[1])) for y in range(len(CONDITIONS))])
+    return discount * correction
+
+
+def backup(model, belief_sets, gamma, discount=0.99):
+    """Phase 2: One PBVI backup sweep using explicit T, Z, and R."""
     new_gamma = {x_idx: [] for x_idx in belief_sets}
-    
-    all_alphas = [(alpha, action_id) for points in gamma.values() for alpha, action_id in points]
-    
-    non_terminal_alphas = [alpha for alpha, action_id in all_alphas if action_id is not None]
-    prev_alphas = np.array(non_terminal_alphas) if non_terminal_alphas else np.empty((0, model.space.n_s)) #
 
     for x_idx, points in belief_sets.items():
         for b, insp_actions in points:
-            model.available_insp_actions = insp_actions  # this point's own mask
+            model.available_insp_actions = insp_actions
             best_value, best_alpha, best_action = -np.inf, None, None
 
             for action_id in model.valid_actions(x_idx):
-                reward = model.reward(action_id)
                 details = model.env.actions[action_id]
+                R = model.reward(action_id, x_idx)
 
                 if details["action_type"] == "Triage":
-                    alpha = reward
+                    alpha = R
                 else:
-                    T = model.transition(action_id)
-                    Z, _ = model.observation(action_id)
-                    alpha = reward + _observation_cross_sum(prev_alphas, T, Z, b, discount)
+                    T = model.transition(action_id, x_idx)
+                    Z, obs_labels = model.observation(action_id)
+                    # Next available inspection actions
+                    if details["action_type"] == "Disassy":
+                        next_insp = set(INSPECTION_ACTIONS)
+                    else:
+                        next_insp = insp_actions - {action_id}
+                    alpha = R + _observation_cross_sum(model, gamma, T, Z, b, discount, x_idx, next_insp)
 
                 value = float(b @ alpha)
                 if value > best_value:
@@ -237,11 +195,12 @@ def backup(model, belief_sets, gamma, discount=0.95):
     return new_gamma
 
 
-def solve(model, n_iterations=5, n_trajectories=20, horizon=10, epsilon=0.05, discount=0.95, rng=None):
-    """Alternates belief expansion and value backup for n_iterations sweeps."""
+
+def solve(model, n_iterations=5, n_trajectories=20, horizon=10, epsilon=0.05, discount=0.99, rng=None):
+    """Alternates belief expansion and value backup for n_iterations."""
     belief_sets = {}
     root_x = model.env.state_to_idx[model.env.root_state]
-    gamma = {root_x: [(np.zeros(model.space.n_s), None)]}
+    gamma = {root_x: [(np.zeros(len(CONDITIONS)), None)]}
 
     for i in tqdm(range(n_iterations), desc="Solving", unit="iter"):
         belief_sets = expand_beliefs(model, belief_sets, n_trajectories, horizon, epsilon, rng)
@@ -254,10 +213,12 @@ def solve(model, n_iterations=5, n_trajectories=20, horizon=10, epsilon=0.05, di
 
 
 def save_policy(gamma, path):
+    """Saves policy dictionary to a pickle file."""
     with open(path, "wb") as f:
         pickle.dump(gamma, f)
 
 
 def load_policy(path):
+    """Loads policy dictionary from a pickle file."""
     with open(path, "rb") as f:
         return pickle.load(f)
